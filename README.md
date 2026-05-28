@@ -30,17 +30,20 @@ Running the script produces an `adnd2-compendium/` directory containing **11 Fou
 
 - **AD&D Core Rules 2.0 Expansion CD-ROM** — your own personal copy
 - **Python 3.8+**
+- **Node.js** with [fvtt-cli](https://github.com/foundryvtt/foundryvtt-cli) — used to write the Foundry LevelDB packs
 - **Foundry VTT v14** with the **ARS** system installed (Variant 2)
 
-Python dependencies:
+Install fvtt-cli globally:
 
 ```bash
-pip install plyvel beautifulsoup4 Pillow
+npm install -g @foundryvtt/foundryvtt-cli
 ```
 
-> **Linux/macOS** — `plyvel` requires LevelDB. On Fedora/RHEL: `sudo dnf install leveldb-devel`. On Debian/Ubuntu: `sudo apt install libleveldb-dev`.
+Install Python dependencies:
 
-> **Windows** — see the [Windows instructions](#windows) below before running `pip install`.
+```bash
+pip install beautifulsoup4 Pillow
+```
 
 ---
 
@@ -70,6 +73,12 @@ DATABASE_BASE = "cd-rom/DATABASE"         # path to the .DAT files
 BITMAPS_BASE  = "cd-rom/BITMAPS"          # path to the bitmap icons
 ```
 
+If `fvtt` is not on your PATH, change this constant to `'npx @foundryvtt/foundryvtt-cli'`:
+
+```python
+_FVTT_CLI_CMD = 'fvtt'
+```
+
 The output directory (`adnd2-compendium/`) is created alongside the script. You can change its location by editing the `OUTPUT_PACKS` dict and the `OUTPUT_IMG_*` constants.
 
 ---
@@ -78,6 +87,12 @@ The output directory (`adnd2-compendium/`) is created alongside the script. You 
 
 ```bash
 python3 migrate.py
+```
+
+On Windows:
+
+```
+python migrate.py
 ```
 
 The script is **idempotent** — re-running it deletes and fully regenerates the output from scratch. Expect it to take a few minutes on first run.
@@ -101,34 +116,27 @@ Then in Foundry: **Settings → Manage Modules → AD&D 2e Compendium → Enable
 
 ## Windows
 
-`plyvel` wraps LevelDB, which has no official Windows binary distribution. The easiest path is **WSL2**.
+Node.js is required (for fvtt-cli). If you don't have it, download it from [nodejs.org](https://nodejs.org/).
 
-### Option 1 — WSL2 (recommended)
+Once Node.js is installed, open a terminal and run:
 
-1. [Install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) with Ubuntu (one command in PowerShell: `wsl --install`)
-2. Open the Ubuntu terminal and install dependencies:
+```
+npm install -g @foundryvtt/foundryvtt-cli
+pip install beautifulsoup4 Pillow
+python migrate.py
+```
+
+### WSL2 alternative
+
+If you prefer, you can also run the script under WSL2 (Windows Subsystem for Linux):
+
+1. [Install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install): `wsl --install` in PowerShell
+2. In the Ubuntu terminal:
    ```bash
-   sudo apt install python3 python3-pip libleveldb-dev
-   pip3 install plyvel beautifulsoup4 Pillow
-   ```
-3. Access your CD-ROM files from WSL at `/mnt/c/...` (or the drive letter where they live), and update `SOURCE_BASE`, `DATABASE_BASE`, and `BITMAPS_BASE` in `migrate.py` accordingly.
-4. Run the script from the WSL terminal:
-   ```bash
+   sudo apt install python3 python3-pip nodejs npm
+   npm install -g @foundryvtt/foundryvtt-cli
+   pip3 install beautifulsoup4 Pillow
    python3 migrate.py
    ```
-5. The generated `adnd2-compendium/` folder is accessible from Windows Explorer under `\\wsl$\Ubuntu\...` and can be copied to your Foundry `Data/modules/` folder as usual.
-
-### Option 2 — Anaconda / Miniconda (native Windows)
-
-[Miniconda](https://docs.anaconda.com/miniconda/) provides a pre-built `plyvel` package for Windows via conda-forge, with no compilation required.
-
-1. Install [Miniconda](https://docs.anaconda.com/miniconda/) (or Anaconda).
-2. Open the **Anaconda Prompt** and install all dependencies in one command:
-   ```
-   conda install -c conda-forge plyvel beautifulsoup4 pillow
-   ```
-3. Run the script from the Anaconda Prompt:
-   ```
-   python migrate.py
-   ```
-   Note: on Windows the command is `python`, not `python3`.
+3. Access your CD-ROM files at `/mnt/c/...` and update the path constants accordingly.
+4. The generated `adnd2-compendium/` folder is accessible from Windows Explorer under `\\wsl$\Ubuntu\...`.

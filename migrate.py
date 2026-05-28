@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Build the `adnd2-compendium` Foundry VTT module from a local AD&D 2e Core Rules
-CD-ROM. Standalone deliverable: stdlib + plyvel + beautifulsoup4 + Pillow only.
+CD-ROM. migrate2.py variant: uses fvtt-cli instead of plyvel for LevelDB writes
+(Windows-friendly). Requires Node.js + npm install -g @foundryvtt/foundryvtt-cli.
 Idempotent — each run deletes and regenerates every output pack from scratch.
 
 Target: Foundry VTT v14, system ARS Variant 2 (AD&D 2e / THAC0). Packs are
@@ -58,12 +59,19 @@ import shutil
 import random
 import string
 import struct
-import plyvel
+import subprocess
 from html.parser import HTMLParser
 from bs4 import BeautifulSoup, NavigableString, Tag
 from PIL import Image
 
 # ─── Configuration ────────────────────────────────────────────────────────────
+
+# fvtt-cli integration (migrate2.py — plyvel-free variant)
+# Install fvtt-cli globally: npm install -g @foundryvtt/foundryvtt-cli
+# Change to 'npx @foundryvtt/foundryvtt-cli' if 'fvtt' is not on PATH.
+_FVTT_CLI_CMD  = 'fvtt'
+# Intermediate JSON staging directory (deleted after packing).
+_PACK_SRC_BASE = "adnd2-compendium-src"
 
 # Phase 2 — HTML rulebooks
 SOURCE_BASE  = "cd-rom/MACBOOKS/HTML"
@@ -6005,13 +6013,132 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
 
 # ─── Phase 3 migration drivers ────────────────────────────────────────────────
 
+class _JsonPack:
+    """Drop-in replacement for a plyvel DB used by migrate2.py.
+
+    Accumulates key→value entries in memory (same put/close interface as plyvel).
+    On close(), restructures embedded sub-documents (pages into journal entries,
+    effects into items/actors, results into roll tables) and writes one JSON file
+    per top-level document into *src_dir* for fvtt-cli to consume.
+    """
+
+    def __init__(self, pack_name, src_dir):
+        self._pack_name = pack_name
+        self._src_dir   = src_dir
+        self._entries   = {}   # key_str -> value_str
+
+    def put(self, key, value):
+        k = key.decode('utf-8')   if isinstance(key,   bytes) else key
+        v = value.decode('utf-8') if isinstance(value, bytes) else value
+        self._entries[k] = v
+
+    def close(self):
+        # top: doc_id -> (collection, doc dict)
+        top      = {}
+        # children: (parent_col, parent_id) -> {child_array: [child_doc]}
+        children = {}
+
+        for key, val_str in self._entries.items():
+            doc = json.loads(val_str)
+            # Key format: "!collection!id" or "!parent.child!parentId.childId"
+            raw        = key.lstrip('!')
+            collection, _, ids = raw.partition('!')
+            if not ids:
+                continue
+
+            if '.' in collection:
+                # Embedded sub-document: "items.effects", "journal.pages", etc.
+                parent_col, child_array = collection.split('.', 1)
+                parent_id, _, child_id = ids.partition('.')
+                if not doc.get('_id'):
+                    doc['_id'] = child_id
+                # fvtt-cli needs _key on sub-docs to write them as separate LevelDB entries
+                doc['_key'] = key
+                children.setdefault((parent_col, parent_id), {}).setdefault(child_array, []).append(doc)
+            else:
+                top[ids] = (collection, doc)
+
+        # Embed children into their parent documents.
+        # First clear any arrays that contain legacy string IDs (not dict objects):
+        # fvtt-cli requires arrays to contain full sub-doc objects (with _key), not
+        # bare ID strings. Items written with effects=[id1, id2] get cleared here;
+        # the actual effect objects (from !items.effects! entries) are re-embedded below.
+        _EMBEDDED_ARRAYS = ('effects', 'pages', 'results', 'items')
+        for doc_id, (collection, doc) in top.items():
+            for arr in _EMBEDDED_ARRAYS:
+                val = doc.get(arr)
+                if isinstance(val, list) and any(not isinstance(e, dict) for e in val):
+                    doc[arr] = []
+
+        for (parent_col, parent_id), arrays in children.items():
+            if parent_id not in top:
+                continue
+            _, parent_doc = top[parent_id]
+            for array_name, child_list in arrays.items():
+                parent_doc[array_name] = child_list
+
+        # Write one JSON file per top-level document; _key is required by fvtt-cli
+        for doc_id, (collection, doc) in top.items():
+            doc['_key'] = f'!{collection}!{doc_id}'
+            safe = re.sub(r'[^A-Za-z0-9_-]', '_', doc_id)
+            filepath = os.path.join(self._src_dir, f'{safe}.json')
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(doc, f, ensure_ascii=False, indent=2)
+
+
 def _open_pack(path):
-    """Wipe and recreate a LevelDB pack directory, returning an open plyvel DB.
-    The wipe is what makes each run idempotent (output regenerated from scratch)."""
-    if os.path.exists(path):
-        shutil.rmtree(path)
-    os.makedirs(path, exist_ok=True)
-    return plyvel.DB(path, create_if_missing=True)
+    """Return a _JsonPack that stages documents as JSON files for fvtt-cli.
+    The staging directory is wiped on open so each run is idempotent."""
+    pack_name = os.path.basename(path)
+    src_dir   = os.path.join(_PACK_SRC_BASE, pack_name)
+    if os.path.exists(src_dir):
+        shutil.rmtree(src_dir)
+    os.makedirs(src_dir, exist_ok=True)
+    return _JsonPack(pack_name, src_dir)
+
+
+def _finalize_with_fvtt_cli():
+    """Convert every staged JSON directory into a LevelDB pack via fvtt-cli.
+
+    Requires fvtt-cli installed globally:
+        npm install -g @foundryvtt/foundryvtt-cli
+    or set _FVTT_CLI_CMD = 'npx @foundryvtt/foundryvtt-cli' above.
+    """
+    print("\n=== Packing LevelDB with fvtt-cli ===")
+    if not os.path.exists(_PACK_SRC_BASE):
+        print("  No staged packs found — nothing to pack.")
+        return
+
+    # fvtt-cli creates a subdirectory named after -n inside --out.
+    # So --out must be the packs PARENT and -n the pack directory name.
+    packs_dir = os.path.dirname(OUTPUT_DB)   # adnd2-compendium/packs/
+    os.makedirs(packs_dir, exist_ok=True)
+
+    ok = fail = 0
+    for pack_name in sorted(os.listdir(_PACK_SRC_BASE)):
+        src = os.path.join(_PACK_SRC_BASE, pack_name)
+        if not os.path.isdir(src):
+            continue
+        # Remove existing pack dir so fvtt-cli starts clean
+        existing = os.path.join(packs_dir, pack_name)
+        if os.path.exists(existing):
+            shutil.rmtree(existing)
+
+        # --out = parent dir; fvtt-cli writes to parent/pack_name/
+        cmd    = [_FVTT_CLI_CMD, 'package', 'pack', '-n', pack_name, '--in', src, '--out', packs_dir]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        n      = len([f for f in os.listdir(src) if f.endswith('.json')])
+        if result.returncode == 0:
+            print(f"  ✓ {pack_name} ({n} docs)")
+            ok += 1
+        else:
+            msg = (result.stderr or result.stdout).strip()
+            print(f"  ✗ {pack_name}: {msg}")
+            fail += 1
+
+    print(f"  → {ok} packs OK, {fail} failed")
+    if fail == 0:
+        shutil.rmtree(_PACK_SRC_BASE)   # clean up staging dir on full success
 
 
 def _race_portrait_for(race):
@@ -8041,16 +8168,18 @@ def migrate_kits():
     # so a kit's bonus-prof name resolves to its compendium item.
     link_map = {}
     for packkey in ('skills', 'proficiencies'):
-        path = OUTPUT_PACKS[packkey]
-        if not os.path.exists(path):
+        src_dir = os.path.join(_PACK_SRC_BASE, os.path.basename(OUTPUT_PACKS[packkey]))
+        if not os.path.isdir(src_dir):
             continue
-        pdb = plyvel.DB(path)
-        for k, v in pdb:
-            if k.startswith(b'!items!'):
-                it = json.loads(v)
-                link_map.setdefault(_kit_prof_norm(it['name']),
-                                    (it['_id'], it['name'], it['img'], packkey, it['type']))
-        pdb.close()
+        for fname in os.listdir(src_dir):
+            if not fname.endswith('.json'):
+                continue
+            with open(os.path.join(src_dir, fname), encoding='utf-8') as fh:
+                it = json.load(fh)
+            if 'img' not in it or it.get('type') not in ('skill', 'proficiency'):
+                continue
+            link_map.setdefault(_kit_prof_norm(it['name']),
+                                (it['_id'], it['name'], it['img'], packkey, it['type']))
 
     # Cache each handbook dir's case-insensitive filename map for clean_html_file.
     srcfiles = {}
@@ -8121,15 +8250,15 @@ def migrate_treasure():
     # Item name → UUID, read back from the already-written items pack so leaf
     # results link to the real item. Best-effort; unmatched names stay text.
     item_uuids = {}
-    items_path = OUTPUT_PACKS['items']
-    if os.path.exists(items_path):
-        idb = plyvel.DB(items_path)
-        for k, v in idb:
-            if k.startswith(b'!items!'):
-                it = json.loads(v)
-                item_uuids.setdefault(it['name'],
-                    f"Compendium.{MODULE_ID}.adnd2-items.Item.{it['_id']}")
-        idb.close()
+    items_src = os.path.join(_PACK_SRC_BASE, os.path.basename(OUTPUT_PACKS['items']))
+    if os.path.isdir(items_src):
+        for fname in os.listdir(items_src):
+            if not fname.endswith('.json'):
+                continue
+            with open(os.path.join(items_src, fname), encoding='utf-8') as fh:
+                it = json.load(fh)
+            item_uuids.setdefault(it['name'],
+                f"Compendium.{MODULE_ID}.adnd2-items.Item.{it['_id']}")
     db = _open_pack(OUTPUT_PACKS['treasure'])
     n_tables = n_results = n_linked = 0
     for t in tables:
@@ -8288,12 +8417,15 @@ def main():
     print("AD&D 2e Migration")
     print(f"Output: {OUTPUT_DB}")
 
-    if os.path.exists(OUTPUT_DB):
-        shutil.rmtree(OUTPUT_DB)
-    os.makedirs(OUTPUT_DB, exist_ok=True)
     os.makedirs(OUTPUT_IMG, exist_ok=True)
 
-    db = plyvel.DB(OUTPUT_DB, create_if_missing=True)
+    journal_name = os.path.basename(OUTPUT_DB)
+    journal_src  = os.path.join(_PACK_SRC_BASE, journal_name)
+    if os.path.exists(journal_src):
+        shutil.rmtree(journal_src)
+    os.makedirs(journal_src, exist_ok=True)
+
+    db = _JsonPack(journal_name, journal_src)
     stats = {'journals': 0, 'pages': 0}
 
     for folder_sort, folder_config in enumerate(FOLDERS):
@@ -8332,6 +8464,9 @@ def main():
             import traceback; traceback.print_exc()
     else:
         print(f"\n  Phase 3 skipped: {DATABASE_BASE} not found.")
+
+    # ─── fvtt-cli pack ────────────────────────────────────────────────────────
+    _finalize_with_fvtt_cli()
 
     # ─── Module manifest ──────────────────────────────────────────────────────
     write_module_json(stats)
