@@ -964,6 +964,12 @@ def parse_class_record(buf, start, end):
     gid = r['group_id']
     r['group'] = (['warrior', 'rogue', 'priest', 'wizard', 'psionicist'][gid]
                   if 0 <= gid <= 4 else 'unknown')
+    # Proficiency fields live in the 33-int32 header zone between sub_class_id and
+    # the XP table. Offsets validated against all 26 classes (see class_probe3.txt):
+    #   [23] = NWP starting slots   [24] = NWP gain rate (every N levels)
+    #   [27] = WP starting slots    [28] = WP gain rate  (every N levels)
+    #   [29] = non-proficiency attack penalty (negative)
+    _rel = p - start + 8   # relative offset of first proficiency int32 zone from start
     # Find XP table — sequence of monotonic ints starting with L2 XP
     # Locate by scanning for plausible start (small int < 5000)
     chunk = buf[start:start+1024]
@@ -977,6 +983,13 @@ def parse_class_record(buf, start, end):
             xp_offset = off
             break
     if xp_offset is not None:
+        # Proficiency fields at fixed int32 indices from p_data (see _rel above)
+        if _rel + 29*4 + 4 <= xp_offset:
+            r['nwp_starting']  = struct.unpack_from('<i', chunk, _rel + 23*4)[0]
+            r['nwp_gain_level']= struct.unpack_from('<i', chunk, _rel + 24*4)[0]
+            r['wp_starting']   = struct.unpack_from('<i', chunk, _rel + 27*4)[0]
+            r['wp_gain_level'] = struct.unpack_from('<i', chunk, _rel + 28*4)[0]
+            r['wp_penalty']    = struct.unpack_from('<i', chunk, _rel + 29*4)[0]
         # HD die/count/HP-after live ~72 bytes before XP table (validated for Fighter, Mage, etc.)
         if xp_offset >= 72:
             r['hit_die']         = struct.unpack_from('<i', chunk, xp_offset - 72)[0]
@@ -4315,10 +4328,11 @@ def make_class_item(cls):
                 "wisSpellBonusDisabled": False,
             },
             "proficiencies": {
-                # No starting/earnLevel data in CLASS.DAT; emit schema defaults.
-                "penalty":  0,
-                "weapon":   {"starting": 0, "earnLevel": 0},
-                "skill":    {"starting": 0, "earnLevel": 0},
+                "penalty":  cls.get('wp_penalty',    0),
+                "weapon":   {"starting":  cls.get('wp_starting',    0),
+                             "earnLevel": cls.get('wp_gain_level',  0)},
+                "skill":    {"starting":  cls.get('nwp_starting',   0),
+                             "earnLevel": cls.get('nwp_gain_level', 0)},
             },
             "matrixTable": _CLASS_MATRIX_TABLE.get(group, ''),
             "isPsionic":   is_psionic,
