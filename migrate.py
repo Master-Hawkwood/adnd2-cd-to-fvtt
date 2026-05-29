@@ -53,6 +53,7 @@ Companion docs at the project root: DAT_FORMAT.md (binary formats), CLAUDE.md
 
 import os
 import re
+import sys
 import html
 import json
 import shutil
@@ -6180,7 +6181,11 @@ def _finalize_with_fvtt_cli():
 
         # --out = parent dir; fvtt-cli writes to parent/pack_name/
         cmd    = [_FVTT_CLI_CMD, 'package', 'pack', '-n', pack_name, '--in', src, '--out', packs_dir]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # On Windows npm-global commands are .cmd files and require shell=True to be
+        # found by CreateProcess. encoding= avoids cp1252 decoding errors on non-ASCII output.
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                shell=(sys.platform == 'win32'),
+                                encoding='utf-8', errors='replace')
         n      = len([f for f in os.listdir(src) if f.endswith('.json')])
         if result.returncode == 0:
             print(f"  ✓ {pack_name} ({n} docs)")
