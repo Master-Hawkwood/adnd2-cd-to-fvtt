@@ -118,31 +118,3 @@ Copy the generated `adnd2-compendium/` folder into your Foundry `Data/modules/` 
 
 Then in Foundry: **Settings → Manage Modules → AD&D 2e Compendium → Enable**.
 
----
-
-## Windows
-
-Node.js is required (for fvtt-cli). If you don't have it, download it from [nodejs.org](https://nodejs.org/).
-
-Once Node.js is installed, open a terminal and run:
-
-```
-npm install -g @foundryvtt/foundryvtt-cli
-pip install beautifulsoup4 Pillow
-python migrate.py
-```
-
-### WSL2 alternative
-
-If you prefer, you can also run the script under WSL2 (Windows Subsystem for Linux):
-
-1. [Install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install): `wsl --install` in PowerShell
-2. In the Ubuntu terminal:
-   ```bash
-   sudo apt install python3 python3-pip nodejs npm
-   npm install -g @foundryvtt/foundryvtt-cli
-   pip3 install beautifulsoup4 Pillow
-   python3 migrate.py
-   ```
-3. Access your CD-ROM files at `/mnt/c/...` and update the path constants accordingly.
-4. The generated `adnd2-compendium/` folder is accessible from Windows Explorer under `\\wsl$\Ubuntu\...`.
