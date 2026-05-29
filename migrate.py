@@ -145,7 +145,7 @@ FOLDERS = [
     },
 ]
 
-CORE_VERSION   = "14.361"
+CORE_VERSION   = "14.363"
 SYSTEM_ID      = "ars"
 SYSTEM_VERSION = "2026.05.25"
 
