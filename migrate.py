@@ -2137,6 +2137,7 @@ def _normalize_spell_name_for_lookup(name):
         "create food & water":           "create food & drink",
         # Reverse spells whose DAT name differs from the primary's HTM page title
         "babble":                        "tongues",
+        "badberry":                      "goodberry",
     }
     base = keys[0] if keys else n_clean.lower()
     if base in ALIASES:
