@@ -62,9 +62,7 @@ import string
 import struct
 import subprocess
 from html.parser import HTMLParser
-from typing import Any
-from bs4 import BeautifulSoup
-from bs4.element import NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 from PIL import Image
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -182,7 +180,7 @@ class TitleParser(HTMLParser):
         super().__init__()
         self._in = False
         self.title = ''
-    def handle_starttag(self, tag, attrs):  # noqa: attrs required by HTMLParser interface
+    def handle_starttag(self, tag, attrs):
         if tag == 'title': self._in = True
     def handle_endtag(self, tag):
         if tag == 'title': self._in = False
@@ -264,8 +262,8 @@ def _chapter_title_from_file(filepath):
         raw = f.read()
     soup = BeautifulSoup(raw, 'html.parser')
     for font in soup.find_all('font'):
-        color = str(font.get('color') or '').lower()
-        try:    size = int(str(font.get('size') or 0))
+        color = (font.get('color') or '').lower()
+        try:    size = int(font.get('size') or 0)
         except (TypeError, ValueError): size = 0
         is_bold = bool(font.find('b')) or (
             font.parent and getattr(font.parent, 'name', None) == 'b')
@@ -337,7 +335,7 @@ def build_chapters(book_dir, book_prefix, toc_entries):
 BLOCK_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'pre', 'ul', 'ol', 'blockquote'}
 
 
-def merge_consecutive_headings(body):
+def merge_consecutive_headings(body, soup):
     """
     Merge consecutive sibling headings of the same level into one.
     e.g. <h2>Chapter 1:</h2><h2>Title</h2> → <h2>Chapter 1: Title</h2>
@@ -352,7 +350,7 @@ def merge_consecutive_headings(body):
                 nxt = h.next_sibling
                 while nxt and isinstance(nxt, NavigableString) and not nxt.strip():
                     nxt = nxt.next_sibling
-                if nxt and isinstance(nxt, Tag) and nxt.name == level:
+                if nxt and getattr(nxt, 'name', None) == level:
                     # Merge: append content of nxt into h
                     h.append(NavigableString(' '))
                     for child in list(nxt.children):
@@ -459,13 +457,14 @@ def process_fonts(body, soup, src_dir_files, book_key):
     # Convert FONT tags to semantic equivalents
     # Process bottom-up to handle nesting correctly
     for font in body.find_all('font'):
-        color    = str(font.get('color') or '').lower()
-        try:    size = int(str(font.get('size') or 3))
+        color    = (font.get('color') or '').lower()
+        try:    size = int(font.get('size') or 3)
         except (TypeError, ValueError): size = 3
 
         is_bold = bool(font.find('b')) or (font.parent and getattr(font.parent, 'name', None) == 'b')
 
         red    = color in ('#ff0000', 'red')
+        green  = color in ('#008000', 'green')
         blue   = color in ('#0000ff', 'blue')
         purple = color in ('#800080', 'purple')
         navy   = color == '#000080'
@@ -514,7 +513,7 @@ def _clean_html_body(body, soup, book_key, src_dir_files):
     file) and the sub-race-section extractor."""
     process_fonts(body, soup, src_dir_files, book_key)
     clean_heading_content(body)
-    merge_consecutive_headings(body)
+    merge_consecutive_headings(body, soup)
     restructure_paragraphs(body, soup)
     for h in body.find_all(['h1', 'h2', 'h3', 'h4']):
         text = h.get_text()
@@ -644,8 +643,7 @@ def read_mfc_long_pascal(buf, off):
 def parse_mfc_header(buf):
     """Read CArchive class header. Returns (count, schema, class_name, header_end)."""
     count  = struct.unpack_from('<H', buf, 0)[0]
-    # buf[2:4] is the class tag (expected 0xFFFF), skip it
-    struct.unpack_from('<H', buf, 2)
+    _tag   = struct.unpack_from('<H', buf, 2)[0]   # expect 0xFFFF
     schema = struct.unpack_from('<H', buf, 4)[0]
     nlen   = struct.unpack_from('<H', buf, 6)[0]
     name   = buf[8:8+nlen].decode('ascii')
@@ -795,8 +793,8 @@ def parse_montype(buf):
     for off in markers:
         name, p = read_pascal(buf, off)
         if not name: continue
-        # Skip the sheet Pascal (value unused)
-        _, p = read_pascal(buf, p)
+        # Skip the sheet Pascal
+        _sheet, p = read_pascal(buf, p)
         # Skip 10 bytes of structured data
         p += 10
         # Individual Pascal
@@ -2162,7 +2160,10 @@ _SP_ABILITY_LEGEND_FILES   = ['SP/SP00033.HTM',  # "Abilities and Restrictions -
 _SP_EXOTIC_TABLE_FILE      = 'SP/SP00059.HTM'    # codes legend lookup for exotic-race abilities
 _SP_THIEF_SKILLS_FILE      = 'SP/SP00074.HTM'    # column-header source for thief skill names
 _SP_THIEF_BASE_FILE        = 'SP/SP00073.HTM'    # base scores per thief skill
+_DMG_HEAR_NOISE_FILE       = 'DMG/DMG00472.HTM'  # Table 83 — Chance to Hear Noise by Race
+_DMG_LISTENING_FILE        = 'DMG/DMG00471.HTM'  # Listening (chapter prose)
 _PHB_CLIMBING_RATES_FILE   = 'PHB/PHB00378.HTM'  # Table 65 — Base Climbing Success Rates
+_PHB_CLIMBING_CHAPTER_FILE = 'PHB/PHB00375.HTM'  # Climbing (chapter prose)
 
 # Lineage → SP demihuman page containing detection sub-skill thresholds.
 # (Half-elf / Half-ogre / Human SP pages have no parseable thresholds.)
@@ -2381,11 +2382,43 @@ _sp_exotic_cache   = None
 _sp_subrace_cache  = {}     # {sp_file_path: {subrace_heading: [ability_cells]}}
 _ability_desc_cache = None  # {normalized_label: html} merged across SP files
 _thief_skill_names_cache = None    # ordered list of 13 skill names from SP00074
+_dmg_hear_noise_cache    = None    # {race_lower: percent_int}
 _sp_thief_base_cache     = None    # {skill_lower: percent_int}
 _phb_unskilled_climb_cache = None  # percent_int
 _lineage_detection_cache = {}      # {lineage: [(sub_skill, max_succ, die_size), ...]}
 
 
+def _load_dmg_hear_noise_table():
+    """Parse DMG Table 83 (Chance to Hear Noise by Race). The table is laid
+    out in row-major order as alternating bands of race-name cells and
+    percent-value cells (e.g. 3 names, then 3 values; the second band has
+    its own 3 names + 3 values, separated by blank cells). We walk every
+    cell in document order, sort label-vs-value by content (label = words,
+    value = starts with N%), then pair adjacent groups in 1:1 order.
+    Returns {race_lower: percent_int}."""
+    global _dmg_hear_noise_cache
+    if _dmg_hear_noise_cache is not None:
+        return _dmg_hear_noise_cache
+    out = {}
+    path = os.path.join(SOURCE_BASE, _DMG_HEAR_NOISE_FILE)
+    if os.path.exists(path):
+        with open(path, 'r', encoding='cp1252') as f:
+            soup = BeautifulSoup(f.read(), 'html.parser')
+        labels, percents = [], []
+        for table in soup.find_all('table'):
+            for tr in table.find_all('tr'):
+                for td in tr.find_all(['td','th']):
+                    txt = td.get_text(' ', strip=True)
+                    if not txt: continue
+                    pm = re.match(r'^\s*(\d+)\s*%', txt)
+                    if pm:
+                        percents.append(int(pm.group(1)))
+                    elif re.match(r'^[A-Za-z][A-Za-z\- ]+$', txt):
+                        labels.append(txt)
+        for lab, pct in zip(labels, percents):
+            out[lab.lower()] = pct
+    _dmg_hear_noise_cache = out
+    return out
 
 
 def _load_sp_thief_base_scores():
@@ -2741,7 +2774,7 @@ def _parse_sp_lineage_abilities_section(sp_rel):
     body = soup.find('body') or soup
     purple = [ft for ft in body.find_all('font')
               if ft.get('size') == '4'
-              and str(ft.get('color') or '').lower() == '#800080']
+              and (ft.get('color') or '').lower() == '#800080']
     section_start = next((ft for ft in purple
                           if 'abilities' in ft.get_text(strip=True).lower()),
                          None)
@@ -2757,9 +2790,9 @@ def _parse_sp_lineage_abilities_section(sp_rel):
             if text:
                 out.append((current_label, f'<p>{text}</p>'))
     for elem in section_start.next_elements:
-        if not isinstance(elem, Tag): continue
+        if isinstance(elem, NavigableString): continue
         if elem.name == 'font' and elem.get('size') == '3' \
-                and str(elem.get('color') or '').lower() == '#ff0000' \
+                and (elem.get('color') or '').lower() == '#ff0000' \
                 and elem.find('b'):
             txt = elem.get_text(' ', strip=True)
             if txt.endswith(':'):
@@ -2768,7 +2801,7 @@ def _parse_sp_lineage_abilities_section(sp_rel):
                 current_chunks = []
                 continue
         if elem.name == 'font' and elem.get('size') == '3' \
-                and str(elem.get('color') or '').lower() != '#ff0000':
+                and (elem.get('color') or '').lower() != '#ff0000':
             t = elem.get_text(' ', strip=True)
             if t: current_chunks.append(t)
     _flush()
@@ -2894,7 +2927,7 @@ def _load_sp_exotic_table():
             for row in table.find_all('tr'):
                 cells = [td.get_text(' ', strip=True) for td in row.find_all('td')]
                 if len(cells) < 6: continue
-                race, ac, hp, mv, _, chars = cells[:6]
+                race, ac, hp, mv, attacks, chars = cells[:6]
                 if race.lower() == 'race': continue
                 if not race and prev_race and chars:
                     # Continuation row — append codes to previous race
@@ -2966,7 +2999,7 @@ def _load_sp_subrace_abilities(sp_file_rel):
                 el = el.parent
                 if el is None: break
                 continue
-            text = getattr(prev, 'get_text', lambda *a, **kw: str(prev))(' ', strip=True)
+            text = getattr(prev, 'get_text', lambda *a, **k: str(prev))(' ', strip=True)
             if text:
                 bits.insert(0, text)
                 if sum(len(b) for b in bits) > 800: break
@@ -3066,7 +3099,7 @@ def _phb_extract_combat_bonuses(phb_text):
     Both magnitude and the creature list are read from the CD-ROM text at
     runtime — nothing about the bonus is hardcoded. Returns None members when a
     pattern isn't present (so races without these bonuses yield nothing)."""
-    out: dict[str, Any] = {'offensive': None, 'defensive': None}
+    out = {'offensive': None, 'defensive': None}
     if not phb_text:
         return out
     # Offensive: "...add 1 to their [dice|attack] rolls to hit orcs, ... hobgoblins."
@@ -3915,8 +3948,6 @@ def _kit_description_html(text):
     for j, pos in enumerate(idx):
         chunk = text[pos:bounds[j+1]]
         m = pat.match(chunk)
-        if not m:
-            continue
         label = m.group(0).rstrip(':').strip()
         rest = html.escape(chunk[m.end():].strip())
         out.append(f'<p><strong>{html.escape(label)}:</strong> {rest}</p>')
@@ -4108,11 +4139,11 @@ def _sp_extract_subrace_html(race_name):
     # in document order, as direct children of <body>.
     boundaries = []
     for child in body.children:
-        if not isinstance(child, Tag) or child.name != 'font':
+        if getattr(child, 'name', None) != 'font':
             continue
         if child.get('size') != '4':
             continue
-        col = str(child.get('color') or '').lower()
+        col = (child.get('color') or '').lower()
         if col not in ('#ff0000', '#800080'):
             continue
         boundaries.append(child)
@@ -4120,7 +4151,7 @@ def _sp_extract_subrace_html(race_name):
     # Find the sub-race heading whose text starts with our prefix
     target_idx = -1
     for i, ft in enumerate(boundaries):
-        col = str(ft.get('color') or '').lower()
+        col = (ft.get('color') or '').lower()
         if col != '#ff0000': continue
         text = ft.get_text(' ', strip=True).lower()
         if text.startswith(search_prefix + ' ') or text == search_prefix:
@@ -4148,7 +4179,6 @@ def _sp_extract_subrace_html(race_name):
     # same cleanup pipeline as a full file.
     new_soup = BeautifulSoup('<html><body></body></html>', 'html.parser')
     new_body = new_soup.body
-    assert new_body is not None
     for c in selected:
         # BeautifulSoup Tag/NavigableString support copy via __copy__
         new_body.append(c.__copy__() if hasattr(c, '__copy__') else NavigableString(str(c)))
@@ -4340,6 +4370,10 @@ def make_class_item(cls, description=''):
 
 
 _SIZE_NORMALIZE = {'T':'tiny','S':'small','M':'medium','L':'large','H':'huge','G':'gargantuan'}
+_DAMAGE_TYPE_LABELS = {
+    'B': 'bludgeoning', 'P': 'piercing', 'S': 'slashing',
+    'B/P': 'bludgeoning_or_piercing', 'P/S': 'piercing_or_slashing', 'B/S': 'bludgeoning_or_slashing',
+}
 
 
 def _ars_damage_type(dt):
@@ -5571,7 +5605,7 @@ def _spell_effect_action_type(name):
     return 'damage'
 
 
-def _make_spell_action_groups(name, save_type, damage_formula,
+def _make_spell_action_groups(name, save_type, damage_formula, spell_type,
                               targeting='single'):
     """Build the actionGroup(s) for a spell item. Minimum: one 'cast'
     action posting a chat card (with the spell's save type so the GM gets
@@ -5653,7 +5687,7 @@ def make_spell_item(spell, desc_override_rel=None):
             "save":         spell.get('saving_throw', ''),
             "learned":      False,
             "actionGroups": _make_spell_action_groups(
-                                spell['name'], save_type, dmg,
+                                spell['name'], save_type, dmg, spell_type,
                                 targeting=targeting),
             # itemList stays empty here; migrate_spells fills it in a
             # post-pass when the spell is the primary of a true reversible
@@ -5926,9 +5960,9 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     # Build attributes from MONSTER.DAT-extracted fields. Each numeric value
     # is only set when MONSTER.DAT actually yielded one; no hand-typed defaults
     # (AC 10, THAC0 20, MV 12, HD 1, etc.) are substituted.
-    attributes: dict[str, Any] = {
-        "hp":   {"value": 0, "min": 0, "max": 0, "temp": 0, "tempmax": 0, "base": 0},
-        "init": {"value": 0, "modifier": 0},
+    attributes = {
+        "hp":     {"value": 0, "min": 0, "max": 0, "temp": 0, "tempmax": 0, "base": 0},
+        "init":   {"value": 0, "modifier": 0},
     }
     if monster.get('ac') is not None:        attributes["ac"]     = {"value": monster['ac']}
     if monster.get('thaco') is not None:     attributes["thaco"]  = {"value": monster['thaco']}
@@ -6263,6 +6297,7 @@ def _race_folder_bucket(race_name):
     """Group a race into one of the sub-folders: 'Standard Races', 'Dwarven Subraces',
     'Elven Subraces', 'Gnomish Subraces', 'Halfling Subraces', 'Humanoid Races'."""
     base = _resolve_base_race(race_name) or ''
+    low  = race_name.lower()
     DEMI_BASES = {'Dwarf','Elf','Gnome','Halfling','Half-elf','Half-orc','Half-ogre','Human'}
     if race_name in DEMI_BASES:
         return 'Standard Races'
@@ -6496,7 +6531,7 @@ def migrate_races():
     for race in races:
         abs_ = _race_abilities_for(race)
         race_abilities.append((race, abs_))
-        for (lab, _, __) in abs_:
+        for (lab, _icon, _chg) in abs_:
             label_count[lab] = label_count.get(lab, 0) + 1
 
     # ── 3. Second pass: mint shared ability docs once, per-race specifics inline ──
@@ -6956,7 +6991,7 @@ def _parse_sp_class_abilities_section(sp_rel):
 
     body = soup.find('body') or soup
     for elem in body.find_all('font'):
-        color = str(elem.get('color') or '').lower()
+        color = (elem.get('color') or '').lower()
         size  = elem.get('size', '')
         bold  = bool(elem.find('b'))
         txt   = elem.get_text(' ', strip=True)
@@ -7714,8 +7749,7 @@ def migrate_classes():
                     action_groups=(acts or None),
                 )
                 # Store the first numeric cost for flag metadata
-                m_cost = re.match(r'\d+', cost_str)
-                first_cost = int(m_cost.group(0)) if m_cost else 0
+                first_cost = int(re.match(r'\d+', cost_str).group(0))
                 ab['folder'] = ab_fid
                 ab['flags']  = {'adnd2': {'cpCost': first_cost,
                                           'cpClass': ab_folder_label}}
@@ -7769,7 +7803,7 @@ def migrate_items():
     for part in parts:
         img = extract_equip_icon(part.get('icon_id'), OUTPUT_IMG_ITEMS)
         item = make_part_item(part, img, base_weapons=base_weapons)
-        bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
+        bucket = TYPE_FOLDER.get(item.get('type'), 'Other Items')
         item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
@@ -8040,6 +8074,11 @@ def _match_montype_key(name, display_name, montype_data):
     return None
 
 
+def _lookup_montype_bmp(name, display_name, montype_data):
+    """Resolve a monster to its MONTYPE individual-icon filename (or None)."""
+    key = _match_montype_key(name, display_name, montype_data)
+    return montype_data.get(key) if key else None
+
 
 _mm_embed_index_cache = None
 
@@ -8198,7 +8237,7 @@ def _load_phb_nwp_table():
     # Group sections are marked by red SIZE=3 bold FONT preceding a table.
     cur_group = None
     for node in soup.find_all(['font', 'table']):
-        if node.name == 'font' and str(node.get('color', '')).lower() == '#ff0000':
+        if node.name == 'font' and node.get('color','').lower() == '#ff0000':
             txt = node.get_text(strip=True).rstrip(':').title()
             if txt in ('General', 'Priest', 'Rogue', 'Warrior', 'Wizard'):
                 cur_group = txt
@@ -8216,7 +8255,7 @@ def _load_phb_nwp_table():
                 # Find anchor file from the <a href> in this row
                 href = None
                 for a in tr.find_all('a', href=True):
-                    if str(a.get('href', '')).endswith('.htm') and '#' not in a['href']:
+                    if a.get('href','').endswith('.htm') and '#' not in a['href']:
                         href = a['href']; break
                 key = name.lower()
                 if key not in out:
@@ -8240,7 +8279,7 @@ def _load_sp_nwp_table():
     soup = BeautifulSoup(open(path, encoding='cp1252').read(), 'html.parser')
     cur_group = None
     for node in soup.find_all(['font', 'table']):
-        if node.name == 'font' and str(node.get('color', '')).lower() == '#ff0000':
+        if node.name == 'font' and node.get('color','').lower() == '#ff0000':
             raw = node.get_text(strip=True).rstrip(':').title()
             if raw in ('General','Priest','Rogue','Warrior','Wizard','Psionicist'):
                 cur_group = raw
@@ -8258,9 +8297,8 @@ def _load_sp_nwp_table():
                 ability = cells[3]
                 href = None
                 for a in tr.find_all('a', href=True):
-                    raw_href = str(a.get('href', ''))
-                    if raw_href.endswith('.htm') or '#' in raw_href:
-                        href = raw_href.split('#')[0]; break
+                    if a.get('href','').endswith('.htm') or '#' in a.get('href',''):
+                        href = a['href'].split('#')[0]; break
                 key = name.lower()
                 if key not in out:
                     out[key] = {'name': name, 'groups': set(), 'cp_cost': cp,
@@ -8432,8 +8470,8 @@ def _load_sp_weapon_groups():
     # Single-tight-group sections have <B><I>NAME</I></B> as the header and
     # the weapon list directly under it.
     for font in body.find_all('font'):
-        if str(font.get('color', '')).lower() != '#ff0000': continue
-        if font.get('size', '') != '3': continue
+        if font.get('color','').lower() != '#ff0000': continue
+        if font.get('size','') != '3': continue
         b = font.find('b')
         if not b: continue
         label = b.get_text(strip=True).rstrip(':').strip()
@@ -8700,6 +8738,18 @@ def _pick_prof_skill_icon(name, fallback):
 
 
 # ── Build PARTS.DAT weapon → item index for the proficiency `appliedto[]` ────
+def _index_weapons_by_name(parts):
+    """Return {base_name_lower: [(item_id, name)]} keyed by stripped name (no +N)."""
+    idx = {}
+    for p in parts:
+        if not p.get('damage_type'): continue
+        if p.get('is_armor'): continue
+        base = re.sub(r'\s*[+\-]\d+.*$', '', p.get('name','')).strip().lower()
+        if not base: continue
+        idx.setdefault(base, []).append(p)
+    return idx
+
+
 # ── Factories ────────────────────────────────────────────────────────────────
 def make_weapon_proficiency_item(weapon, img, applied_part_ids):
     """Build a Foundry proficiency item from one PHB Table 44 row, with
