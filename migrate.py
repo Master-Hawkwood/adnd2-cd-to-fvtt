@@ -2088,6 +2088,11 @@ def _normalize_spell_name_for_lookup(name):
         if kk != k: out.append(kk)
         kk = k.replace('air boat', 'airboat')
         if kk != k: out.append(kk)
+        # accelerate ↔ acclerate (missing 'e' in TOM HTML title)
+        kk = k.replace('accelerate', 'acclerate')
+        if kk != k: out.append(kk)
+        kk = k.replace('acclerate', 'accelerate')
+        if kk != k: out.append(kk)
         # vs ↔ versus
         kk = re.sub(r'\bvs\b\.?', 'versus', k)
         if kk != k: out.append(kk)
