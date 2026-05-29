@@ -1946,7 +1946,7 @@ def html_title_index(book_key, prefix):
             anchors = list(_ANCHORED_SPELL_RE.finditer(raw))
             if not anchors: continue
             for i, m in enumerate(anchors):
-                aname = m.group(2).strip()
+                aname = m.group(2).strip().rstrip(':')   # strip trailing colon from DMG anchors
                 if not (3 <= len(aname) <= 60): continue
                 start = m.start()
                 end = anchors[i+1].start() if i+1 < len(anchors) else len(raw)
@@ -2093,9 +2093,55 @@ def lookup_html_description(name, books):
 
 
 # Per-entity book search order
-_SPELL_HTML_BOOKS  = [('PHB','PHB'), ('TOM','TOM'), ('SM','SM'), ('SP','SP')]
+_SPELL_HTML_BOOKS   = [('PHB','PHB'), ('TOM','TOM'), ('SM','SM'), ('SP','SP')]
 _MONSTER_HTML_BOOKS = [('MM','MM')]
 _ITEM_HTML_BOOKS    = [('AEG','AEG')]
+_ITEM_DMG_BOOKS     = [('DMG','DMG')]
+
+# Regex to strip the weapon subtype from PARTS.DAT sword names so we can
+# reconstruct the DMG's generic "Sword {rest}" title.
+# e.g. "Sword, scimitar +5 Holy Avenger" → strip "Sword, scimitar " → "+5 Holy Avenger"
+_SWORD_SUBTYPE_RE  = re.compile(
+    r'^sword,\s*(?:scimitar|long|short|bastard|broad|two-handed|great)\s+', re.I)
+# Strip ", heavy" / ", light" suffix from crossbow names
+_CROSSBOW_LIGHT_HEAVY_RE = re.compile(r',\s*(?:heavy|light)\s*$', re.I)
+
+
+def _item_magic_lookup_candidates(full_name):
+    """Generate DMG lookup candidates for a PARTS.DAT item name, going beyond
+    the simple +N-stripped base name. Three cases handled:
+      1. Sword variants → strip subtype, reconstruct generic "sword {rest}" key.
+      2. Crossbow variants → drop ", heavy"/", light" suffix.
+      3. Missile-attraction armors → map to generic "armor of missile attraction".
+    The full name (unstripped) is always appended as a final fallback."""
+    candidates = []
+    low = full_name.lower()
+
+    # ── Swords: "Sword, scimitar +5 Holy Avenger" → "sword +5 holy avenger" ──
+    if low.startswith('sword,'):
+        rest = _SWORD_SUBTYPE_RE.sub('', full_name).strip()
+        if rest:
+            candidates.append(f'sword {rest}')      # "sword +5 Holy Avenger"
+            candidates.append(f'sword, {rest}')     # "sword, Vorpal" style
+            # Some DMG anchors use "sword+N, Name" (no space, comma after bonus)
+            m_bonus = re.match(r'([+\-]\d+)\s+(.+)', rest)
+            if m_bonus:
+                candidates.append(f'sword{m_bonus.group(1)}, {m_bonus.group(2)}')
+
+    # ── Crossbows: "Crossbow of speed, heavy" → "crossbow of speed" ──────────
+    if 'crossbow' in low:
+        without_suffix = _CROSSBOW_LIGHT_HEAVY_RE.sub('', full_name).strip()
+        if without_suffix != full_name:
+            candidates.append(without_suffix)
+
+    # ── Missile attraction: all armor variants → single DMG entry ─────────────
+    if 'missile attraction' in low:
+        candidates.append('armor of missile attraction')
+
+    # Full name without +N stripping (for "Sling of Seeking +2" etc.)
+    candidates.append(full_name)
+
+    return [c.lower().strip() for c in candidates if c and len(c) > 3]
 
 
 # ─── Race factual data (numeric stats from PHB 2e, ability labels) ───────────
@@ -4495,7 +4541,15 @@ def make_part_item(part, img_path=None, base_weapons=None):
     if material:
         attributes["material"] = material
 
+    # Primary: AEG (equipment descriptions — mundane + AEG-specific items)
     description = lookup_html_description(base_name, _ITEM_HTML_BOOKS)
+    # Fallback: DMG (magic item descriptions — potions, rings, wands, special weapons…)
+    # Try base_name first, then magic-specific candidates for sword/crossbow/armor variants.
+    if not description:
+        for dmg_cand in [base_name] + _item_magic_lookup_candidates(part['name']):
+            description = lookup_html_description(dmg_cand, _ITEM_DMG_BOOKS)
+            if description:
+                break
 
     system = {
         "description": description, "dmonlytext": "", "itemList": [], "alias": "",
