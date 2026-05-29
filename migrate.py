@@ -7069,50 +7069,139 @@ _BARD_THIEVING_SKILLS = frozenset({
 
 def _class_ability_icon(name):
     """Pick a verified Foundry webp icon for a class ability from its canonical name.
-    All paths validated against FVTT/public/icons/."""
+    All paths validated against FVTT/public/icons/. No SVG fallback — use a
+    recognisable webp for every case."""
     low = name.lower()
+    # ── Holy / Divine ──────────────────────────────────────────────────────────
     if 'detect evil'      in low: return 'icons/magic/perception/eye-ringed-green.webp'
     if 'lay on hands'     in low: return 'icons/magic/life/heart-glowing-red.webp'
     if 'cure disease'     in low: return 'icons/magic/life/cross-yellow-green.webp'
-    if 'turn undead'      in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'expert healer'    in low: return 'icons/magic/life/cross-flared-green.webp'
+    if 'curative'         in low: return 'icons/magic/life/heart-cross-strong-green.webp'
+    if 'healing'          in low: return 'icons/magic/life/heart-cross-strong-green.webp'
+    if 'turn undead'      in low or 'detect undead' in low:
+        return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
     if 'protection'       in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
-    if 'saving throw'     in low: return 'icons/skills/social/intimidation-impressing.webp'
     if 'circle of power'  in low: return 'icons/magic/holy/prayer-hands-glowing-yellow-white.webp'
+    if 'priestly wizard'  in low or 'wizardly priest' in low or 'warrior-priest' in low or 'warrior priest' in low:
+        return 'icons/magic/holy/prayer-hands-glowing-yellow-green.webp'
+    if 'know alignment'   in low: return 'icons/magic/perception/orb-eye-scrying.webp'
+    # ── Saving throws / Resistances ────────────────────────────────────────────
+    if 'saving throw'     in low: return 'icons/skills/social/intimidation-impressing.webp'
+    if 'resist energy'    in low: return 'icons/magic/defensive/barrier-shield-dome-deflect-blue.webp'
+    if 'magic resistance' in low or 'spell resistance' in low:
+        return 'icons/magic/defensive/barrier-shield-dome-deflect-teal.webp'
+    if 'resist charm' in low or 'charm resistance' in low or 'resistance to sleep' in low or 'sound resistance' in low:
+        return 'icons/magic/defensive/barrier-shield-dome-blue-purple.webp'
+    if 'defense bonus'    in low: return 'icons/magic/defensive/armor-shield-barrier-steel.webp'
+    if 'poison resistance' in low: return 'icons/skills/toxins/symbol-poison-drop-skull-green.webp'
+    if 'cold resistance'  in low: return 'icons/magic/water/barrier-ice-crystal-wall-faceted-blue.webp'
+    if 'fire' in low and 'electrical' in low: return 'icons/magic/fire/flame-burning-campfire-orange.webp'
+    if 'fire' in low or 'lightning' in low or 'electrical' in low:
+        return 'icons/magic/fire/flame-burning-campfire-orange.webp'
+    if 'immunity' in low or 'immune' in low:
+        return 'icons/magic/defensive/shield-barrier-glowing-triangle-green.webp'
+    if 'guarded mind'     in low or 'mental defense' in low:
+        return 'icons/magic/defensive/shield-barrier-blue.webp'
+    # ── HP / Health ────────────────────────────────────────────────────────────
+    if 'hit point' in low or '1d12' in low or 'health' in low:
+        return 'icons/magic/life/heart-cross-strong-blue.webp'
+    # ── Armor ──────────────────────────────────────────────────────────────────
+    if 'armored wizard' in low or 'limited armor' in low or 'armor use' in low:
+        return 'icons/equipment/chest/breastplate-banded-steel.webp'
+    if 'weapon allowance' in low or 'weapon use' in low or 'limited weapon' in low:
+        return 'icons/weapons/swords/greatsword-crossguard-silver.webp'
+    # ── Combat / Weapons ───────────────────────────────────────────────────────
+    if 'weapon specialization' in low or 'multiple specialization' in low:
+        return 'icons/weapons/swords/greatsword-crossguard-embossed-gold.webp'
+    if 'two-weapon' in low or 'two weapon' in low:
+        return 'icons/weapons/swords/greatsword-crossguard-blue.webp'
+    if 'combat bonus'     in low: return 'icons/skills/melee/blade-tips-triple-steel.webp'
+    if 'attack mode'      in low: return 'icons/skills/melee/blade-tips-triple-steel.webp'
+    if 'sneak attack'     in low: return 'icons/weapons/daggers/dagger-bone-black.webp'
+    if 'backstab'         in low: return 'icons/weapons/daggers/dagger-curved-black.webp'
+    if 'bow bonus'        in low: return 'icons/skills/ranged/archery-bow-attack-yellow.webp'
+    if 'war machines'     in low: return 'icons/weapons/artillery/cannon-banded.webp'
+    # ── Movement / Stealth ─────────────────────────────────────────────────────
+    if 'increased movement' in low: return 'icons/magic/movement/acceleration-speed-tech-blue.webp'
+    if 'hide in shadow'   in low or 'hide in shadow' in low:
+        return 'icons/magic/air/air-smoke-casting.webp'
+    if 'move silently'    in low or 'stealth' in low:
+        return 'icons/magic/air/air-smoke-casting.webp'
+    if 'climbing'         in low or 'climb walls' in low or 'climb' in low:
+        return 'icons/skills/movement/figure-running-gray.webp'
+    # ── Detection / Perception ─────────────────────────────────────────────────
+    if 'detect magic'     in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'detect illusion'  in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'detect noise'     in low: return 'icons/magic/sonic/bell-alarm-red-purple.webp'
+    if 'read magic'       in low: return 'icons/tools/scribal/ink-quill-red.webp'
+    # ── Spells / Magic ─────────────────────────────────────────────────────────
+    if 'priest spell'     in low: return 'icons/magic/air/air-burst-spiral-teal-green.webp'
+    if 'wizard spell'     in low or 'automatic spell' in low or 'bonus spell' in low:
+        return 'icons/magic/symbols/runes-star-blue.webp'
+    if 'casting reduction' in low or 'spell duration' in low or 'extend duration' in low:
+        return 'icons/magic/time/hourglass-tilted-glowing-gold.webp'
+    if 'range boost'      in low or 'range boost' in low:
+        return 'icons/magic/symbols/arrowhead-green.webp'
+    if 'intense magic'    in low or 'no components' in low:
+        return 'icons/magic/symbols/cog-glowing-green.webp'
+    if 'elemental spell'  in low: return 'icons/magic/symbols/elements-air-earth-fire-water.webp'
+    if 'learning bonus'   in low or 'research bonus' in low:
+        return 'icons/skills/trades/academics-book-study-runes.webp'
+    if 'learning penalty' in low or 'opposition school' in low or 'limited magical' in low:
+        return 'icons/magic/symbols/cross-circle-blue.webp'
+    if 'scroll use'       in low: return 'icons/tools/scribal/ink-quill-pink.webp'
+    # ── Nature / Druid ─────────────────────────────────────────────────────────
     if 'war horse' in low or ('horse' in low and 'war' in low):
         return 'icons/environment/creatures/horse-brown.webp'
-    if 'priest spell'     in low: return 'icons/magic/air/air-burst-spiral-teal-green.webp'
-    if 'wizard spell'     in low: return 'icons/magic/symbols/runes-star-blue.webp'
-    if 'code of conduct' in low or 'code of behavior' in low:
-        return 'icons/equipment/shield/heater-wooden-blue.webp'
-    if 'follower'         in low: return 'icons/skills/social/diplomacy-handshake.webp'
-    if 'stronghold'       in low: return 'icons/environment/settlement/castle.webp'
-    if 'animal'           in low: return 'icons/magic/nature/wolf-paw-glow-orange.webp'
-    if 'tracking'         in low: return 'icons/magic/nature/wolf-paw-glow-orange.webp'
-    if 'species enemy'    in low: return 'icons/magic/nature/wolf-paw-glow-large-orange.webp'
-    if 'stealth' in low or 'hide in shadow' in low or 'move silently' in low:
-        return 'icons/magic/air/air-smoke-casting.webp'
-    if 'shapechange'      in low or 'shape' in low:
+    if 'faithful mount'   in low: return 'icons/environment/creatures/horse-brown.webp'
+    if 'shapechange'      in low or ('shape' in low and 'change' in low):
         return 'icons/magic/nature/seed-acorn-glowing-green.webp'
     if 'identify'         in low: return 'icons/magic/nature/leaf-glow-green.webp'
     if 'pass without trace' in low: return 'icons/magic/nature/vines-thorned-glow-green.webp'
-    if 'immunity'         in low or 'immune'  in low:
-        return 'icons/magic/defensive/shield-barrier-glowing-triangle-green.webp'
-    if 'language'         in low: return 'icons/skills/trades/academics-merchant-scribe.webp'
-    if 'backstab'         in low: return 'icons/weapons/daggers/dagger-curved-black.webp'
-    if 'song'  in low or 'music' in low or 'bard' in low or 'rally' in low:
+    if 'bonus spell'      in low and 'druid' in low: return 'icons/magic/nature/leaf-elm-beam-green.webp'
+    if 'purify water'     in low: return 'icons/magic/water/water-drop-swirl-blue.webp'
+    if 'communicate with' in low or 'speak with' in low:
+        return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'animal'           in low or 'empathy' in low:
+        return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'tracking'         in low: return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'species enemy'    in low or 'special enemy' in low:
+        return 'icons/magic/nature/wolf-paw-glow-large-orange.webp'
+    if 'secret language'  in low: return 'icons/skills/trades/academics-merchant-scribe.webp'
+    # ── Thieving skills ────────────────────────────────────────────────────────
+    if 'open locks'       in low or 'escaping bonds' in low or 'find' in low and 'trap' in low:
+        return 'icons/skills/trades/security-lockpicking-chest-blue.webp'
+    if 'pick pocket'      in low or 'bribe' in low:
+        return 'icons/skills/trades/security-locksmith-key-gray.webp'
+    if 'read language'    in low or 'thieves\' cant' in low:
+        return 'icons/skills/trades/academics-merchant-scribe.webp'
+    if 'tunneling'        in low or 'building' in low:
+        return 'icons/skills/trades/construction-mason-bricklayer-red.webp'
+    # ── Psionic ────────────────────────────────────────────────────────────────
+    if 'psp bonus'        in low or 'psychic adept' in low or 'penetrating mind' in low:
+        return 'icons/magic/perception/third-eye-blue-red.webp'
+    if 'contact'          in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'mental'           in low: return 'icons/magic/defensive/shield-barrier-blue.webp'
+    if 'defense mode'     in low or 'guarded mind' in low:
+        return 'icons/magic/defensive/shield-barrier-dome-deflect-blue.webp'
+    # ── Social / Leadership ────────────────────────────────────────────────────
+    if 'leadership'       in low or 'supervisor' in low:
+        return 'icons/skills/social/diplomacy-peace-alliance.webp'
+    if 'alter moods'      in low or 'influence' in low or 'reaction' in low:
+        return 'icons/skills/social/diplomacy-handshake-yellow.webp'
+    if 'follower'         in low: return 'icons/skills/social/diplomacy-handshake.webp'
+    if 'stronghold'       in low: return 'icons/environment/settlement/castle.webp'
+    if 'code of conduct' in low or 'code of behavior' in low:
+        return 'icons/equipment/shield/heater-wooden-blue.webp'
+    # ── Bard ───────────────────────────────────────────────────────────────────
+    if 'song' in low or 'music' in low or 'rally' in low or 'counter effect' in low:
         return 'icons/tools/instruments/harp-gold-glowing.webp'
     if 'counter'          in low: return 'icons/skills/trades/music-notes-sound-blue.webp'
-    if 'lore' in low or 'legend' in low:
+    if 'history'          in low or 'lore' in low or 'legend' in low:
         return 'icons/skills/trades/academics-book-study-purple.webp'
-    if 'influence' in low or 'reaction' in low:
-        return 'icons/skills/social/diplomacy-handshake.webp'
-    if 'climb walls' in low or 'open locks' in low or 'pick pocket' in low or 'find' in low:
-        return 'icons/skills/trades/locksmith-lockpicking-key-sword.webp'
-    if 'detect noise' in low or 'read language' in low:
-        return 'icons/skills/trades/academics-merchant-scribe.webp'
-    if 'fire' in low or 'lightning' in low or 'electrical' in low:
-        return 'icons/magic/fire/flame-burning-campfire-orange.webp'
-    return 'icons/svg/book.svg'
+    # ── Catch-all (verified webp, not SVG) ────────────────────────────────────
+    return 'icons/skills/trades/academics-investigation-study-blue.webp'
 
 
 def _class_ability_effect_changes(name, lead_text=''):
