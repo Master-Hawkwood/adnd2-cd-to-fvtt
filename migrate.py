@@ -1813,18 +1813,26 @@ def parse_psionic_record(buf, start, end):
         r['discipline'] = struct.unpack_from('<I', buf, p + 4)[0]
     # Walk SHORT Pascal fields, stopping at the first MFC long string (0xFF marker)
     short_pascals = []
+    desc_start = None
     while p < end - 1:
         n = buf[p]
         # Stop if we hit a long-string marker (the description follows)
         if n == 0xFF and p + 3 < end:
+            desc_start = p
             break
-        if 2 <= n <= 80 and p+1+n <= end:
+        if 2 <= n <= 254 and p+1+n <= end:
             seq = buf[p+1:p+1+n]
-            if all(32 <= b < 127 for b in seq):
+            # Allow CR/LF/TAB inside description text alongside printable ASCII
+            if all(b in (9, 10, 13) or (32 <= b < 127) for b in seq):
                 short_pascals.append(seq.decode('latin-1'))
                 p += 1 + n
                 continue
         p += 1
+    # Read the long description pascal that follows the 0xFF marker (> 254 chars)
+    if desc_start is not None:
+        desc, _ = read_mfc_long_pascal(buf, desc_start)
+        if desc and len(desc) > 5:
+            r['description'] = desc.strip()
     # Field assignment based on observed structure:
     # [0] = power score "N/D" or "N+/D+"
     # [1] = range (e.g. "50 yards", "Unlimited", "Personal")
@@ -1833,8 +1841,17 @@ def parse_psionic_record(buf, start, end):
         s0 = short_pascals[0]
         if re.match(r'^\d+\+?\s*/\s*\d+\+?', s0):
             r['power_score'] = s0
-    if len(short_pascals) >= 2: r['range']          = short_pascals[1]
-    if len(short_pascals) >= 3: r['area_of_effect'] = short_pascals[2]
+    if len(short_pascals) >= 2: r['range'] = short_pascals[1]
+    # Fields [2]+ may be aoe and/or a short description (< 80 chars). Distinguish
+    # by length: descriptions are typically >= 40 chars; aoe names are shorter.
+    # Long pascal descriptions (> 80 chars) are handled separately above.
+    for s in short_pascals[2:]:
+        if len(s) >= 40:
+            if 'description' not in r:
+                r['description'] = s
+        else:
+            if 'area_of_effect' not in r:
+                r['area_of_effect'] = s
     # Try to find prerequisite as a SHORT Pascal AFTER the long description (near record end)
     # Scan backwards from end for a Pascal of length 4-30 that's not text-fragment-like
     for k in range(end - 1, max(start, end - 60), -1):
@@ -4297,7 +4314,7 @@ def _class_icon(name):
     return 'icons/svg/book.svg'
 
 
-def make_class_item(cls):
+def make_class_item(cls, description=''):
     """Build an ARS `class` Item from a parsed CLASS.DAT record. Emits the typed
     `system.ranks[]` advancement table (per-level THAC0/saves/XP/HD/spell-slots,
     built by _build_class_ranks) plus class-level features (matrixTable,
@@ -4314,7 +4331,7 @@ def make_class_item(cls):
         "type": "class",
         "img": _class_icon(cls['name']),
         "system": {
-            "description": "",
+            "description": description,
             "active":      True,
             "xp":          0,
             "xpbonus":     0,
@@ -5699,7 +5716,7 @@ def make_power_item(power):
         "type": "power",
         "img": _power_icon(power['name']),
         "system": {
-            "description":   "",
+            "description":   re.sub(r'[\r\n]+', ' ', power.get('description', '')).strip(),
             "discipline":    _DISC_NAMES.get(disc_idx, ''),
             "range":         power.get('range', ''),
             "areaOfEffect":  power.get('area_of_effect', '') or 'personal',
@@ -5877,14 +5894,17 @@ def _monster_saves(save_table, hit_dice):
     return out
 
 
-def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=None):
+def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=None,
+                       embed_index=None):
     """Build an ARS `npc` Actor from a parsed MONSTER.DAT record. AC/THAC0/HD/XP
     come from the DAT; the MM stat-block table (parsed from the matched .HTM
     biography by _parse_mm_statblock) fills #attacks/morale/damage/special
     atk-def/size; saves are derived from the CLASS.DAT fighter table at level=HD
     (`fighter_saves`); `categories` are broad taxonomy tags appended to
     details.type for cross-actor type-trigger effects; a Natural Weaponry
-    actionGroup makes the monster click-to-attack. See CLAUDE.md "NPC schema"."""
+    actionGroup makes the monster click-to-attack. `embed_index` maps normalized
+    monster names to (journal_id, page_id) pairs so biography.value uses @embed
+    instead of the raw HTML when a matching MM journal page exists. See CLAUDE.md."""
     actor_id = make_id()
     img = img_path or "icons/svg/mystery-man.svg"
     align_text = monster.get('alignment', '')
@@ -5912,6 +5932,22 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     # source for the 2e monster-block fields (#attacks, morale, damage, special
     # attacks/defenses, …) — far cleaner than the DAT "tail strings" heuristic.
     sb = _parse_mm_statblock(biography)
+    # Resolve biography display value: prefer an @embed reference to the MM
+    # journal page (already migrated in Phase 2) so the NPC sheet shows the
+    # formatted rulebook page. Fall back to the raw HTML when no matching page
+    # is found (e.g. monsters only in supplemental books, not MM proper).
+    bio_display = biography   # default: raw HTML
+    if embed_index and biography:
+        for cand in candidates:
+            norm = cand.strip().lower()
+            entry = embed_index.get(norm)
+            if entry:
+                jid, pid = entry
+                bio_display = (
+                    f'<p>@embed[Compendium.{MODULE_ID}.adnd2-journals'
+                    f'.JournalEntry.{jid}.JournalEntryPage.{pid}]{{ }}</p>'
+                )
+                break
     # Damage string: labeled MM stat-block value, with the DAT value as the
     # fallback for multi-column blocks where the stat-block cell is truncated.
     # Reused for system.damage and the Natural Weaponry action group.
@@ -5954,7 +5990,7 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
             seen_types.add(cl)
 
     details = {
-        "biography": {"value": biography, "public": ""},
+        "biography": {"value": bio_display, "public": ""},
         "type":      ", ".join(type_tokens),
         "source":    "Monstrous Manual",
         "alignment": align_code,
@@ -6736,6 +6772,84 @@ def migrate_races():
     return n_races
 
 
+_phb_class_desc_cache = None
+
+
+def _build_phb_class_desc_index():
+    """Build {title_lower → clean_html} for PHB class-chapter files (051-109).
+    For each file in that range whose <TITLE> has no '--' suffix (i.e. not a
+    table), strips '(Player's Handbook)' and lowercases. Also aliases common
+    CD-ROM title typos to their corrected spellings so callers can look up by
+    canonical name. First match per title wins; skips empty pages."""
+    global _phb_class_desc_cache
+    if _phb_class_desc_cache is not None:
+        return _phb_class_desc_cache
+    book_dir = os.path.join(SOURCE_BASE, 'PHB')
+    index = {}
+    if not os.path.isdir(book_dir):
+        _phb_class_desc_cache = index
+        return index
+    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    all_files = sorted([
+        f for f in os.listdir(book_dir)
+        if f.upper().startswith('PHB') and f.upper().endswith('.HTM')
+    ])
+    for fn in all_files:
+        num_str = fn.upper().replace('PHB', '').replace('.HTM', '')
+        try:    n = int(num_str)
+        except: continue
+        if not (51 <= n <= 109):
+            continue
+        path = os.path.join(book_dir, fn)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding='cp1252') as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        if '<TITLE>' not in content:
+            continue
+        raw_title = content.split('<TITLE>')[1].split('</TITLE>')[0].strip()
+        # Strip book-name suffix
+        title = re.sub(r"\s*\(Player's Handbook\)", '', raw_title, flags=re.I).strip()
+        # Skip table-of-contents and chapter-intro entries (have "--" in title)
+        if '--' in title or not title:
+            continue
+        key = title.lower()
+        if key in index:
+            continue
+        html = clean_html_file(path, 'PHB', src_dir_files)
+        if not html.strip():
+            continue
+        index[key] = html
+        # Alias CD-ROM typos to corrected spellings ("Speicalist" → "Specialist")
+        corrected = re.sub(r'\bspeicalist\b', 'specialist', key)
+        if corrected != key and corrected not in index:
+            index[corrected] = html
+    _phb_class_desc_cache = index
+    return index
+
+
+def _get_class_desc(cls_name, group, class_descs):
+    """Look up a cleaned PHB class description for a CLASS.DAT class. Tries the
+    class name directly, then group-level fallbacks for specialist wizards and
+    other shared-section cases. Returns '' when nothing matches."""
+    key = cls_name.lower()
+    if key in class_descs:
+        return class_descs[key]
+    # Specialist wizard sub-classes share the "Specialist Wizards" PHB section
+    if group == 'wizard' and key not in ('mage', 'illusionist'):
+        for k, v in class_descs.items():
+            if 'specialist' in k and 'wizard' in k:
+                return v
+    # Priest group: Cleric and Druid have their own entries; fall back to
+    # the group "Priest" intro for any unnamed priest sub-class
+    if group == 'priest' and key not in ('cleric', 'druid'):
+        return class_descs.get('priest', '')
+    return ''
+
+
 def migrate_classes():
     """Phase 3: write the classes pack — a `class` Item per CLASS.DAT record,
     foldered by group (Warriors/Rogues/Priests/Wizards/Psionicists). Returns count."""
@@ -6743,6 +6857,8 @@ def migrate_classes():
     classes = parse_classes()
     if not classes:
         print("  No classes parsed."); return 0
+    class_descs = _build_phb_class_desc_index()
+    print(f"  PHB class descriptions indexed: {len(class_descs)} titles")
     db = _open_pack(OUTPUT_PACKS['classes'])
     # Folder hierarchy by class group (from CLASS.DAT). Specialist wizards
     # all live under 'Wizard' too; 'Psionicist' is its own group from PSIONIC.DAT.
@@ -6759,9 +6875,13 @@ def migrate_classes():
         'wizard':     'Wizards',
         'psionicist': 'Psionicists',
     }
+    no_desc = 0
     count = 0
     for cls in classes:
-        item = make_class_item(cls)
+        desc  = _get_class_desc(cls['name'], cls.get('group', ''), class_descs)
+        if not desc:
+            no_desc += 1
+        item  = make_class_item(cls, description=desc)
         bucket = GROUP_FOLDER.get(cls.get('group',''), None)
         if bucket:
             item['folder'] = folders[bucket]['_id']
@@ -6770,7 +6890,8 @@ def migrate_classes():
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
-    print(f"  → {count} classes in {len(folders)} folders")
+    print(f"  → {count} classes in {len(folders)} folders "
+          f"({no_desc} without PHB description)")
     return count
 
 
@@ -7062,6 +7183,49 @@ def _lookup_montype_bmp(name, display_name, montype_data):
     return montype_data.get(key) if key else None
 
 
+_mm_embed_index_cache = None
+
+
+def _build_mm_embed_index():
+    """Build {normalized_monster_name → (journal_id, page_id)} from the staged
+    adnd2-journals JSON files (written by db.close() before Phase 3 runs).
+    Page titles follow the pattern '{Name} (Monstrous Manual)'; we strip the
+    suffix and lowercase to get the lookup key."""
+    global _mm_embed_index_cache
+    if _mm_embed_index_cache is not None:
+        return _mm_embed_index_cache
+    journal_name = os.path.basename(OUTPUT_DB)        # "adnd2-journals"
+    journal_src  = os.path.join(_PACK_SRC_BASE, journal_name)
+    index = {}
+    if not os.path.isdir(journal_src):
+        _mm_embed_index_cache = index
+        return index
+    for fn in os.listdir(journal_src):
+        if not fn.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(journal_src, fn), encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except Exception:
+            continue
+        if doc.get('name') != 'Monster Manual':
+            continue
+        journal_id = doc.get('_id', '')
+        for page in doc.get('pages', []):
+            page_name = page.get('name', '')
+            page_id   = page.get('_id', '')
+            if not page_name or not page_id:
+                continue
+            # "Argos (Monstrous Manual)" → "argos"
+            norm = re.sub(r'\s*\([^)]*\)', '', page_name).strip().lower()
+            if norm:
+                index[norm] = (journal_id, page_id)
+        break   # only one MM journal entry
+    _mm_embed_index_cache = index
+    print(f"  MM embed index: {len(index)} pages indexed")
+    return index
+
+
 def migrate_monsters():
     """Phase 3: write the monsters pack — an `npc` Actor per MONSTER.DAT record,
     foldered A-Z by name. Resolves MONTYPE icons + broad taxonomy categories and
@@ -7096,6 +7260,7 @@ def migrate_monsters():
         folders[ch] = make_compendium_folder(fid, ch, 'Actor', sort=ord(ch)*1000)
     folders['Other'] = make_compendium_folder(make_id(), 'Other', 'Actor', sort=900000)
 
+    embed_index = _build_mm_embed_index()
     count = 0
     for monster in monsters:
         key  = _match_montype_key(monster.get('name',''), monster.get('display_name',''), montype_data)
@@ -7103,7 +7268,8 @@ def migrate_monsters():
         img  = extract_monster_icon(bmp, OUTPUT_IMG_MONSTERS) if bmp else None
         cats = _monster_categories(key, name_to_index, idx2cat)
         actor = make_monster_actor(monster, img, categories=cats,
-                                   fighter_saves=fighter_saves)
+                                   fighter_saves=fighter_saves,
+                                   embed_index=embed_index)
         name = actor.get('name','').strip()
         first = name[0].upper() if name else 'Z'
         bucket = first if first in folders else 'Other'
