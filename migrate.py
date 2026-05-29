@@ -6909,6 +6909,99 @@ def _get_class_desc(cls_name, group, class_descs):
     return ''
 
 
+# ─── Class CP (Character Points) system ──────────────────────────────────────
+#
+# Each class that has a matching S&P page gets a "(CP)" copy with no auto-granted
+# abilities and a per-class folder of purchasable CP ability items (same pattern
+# as the race CP system: `Races (CP)` / `Racial CP Abilities`).
+#
+# _SP_CLASS_FILES maps class names to their S&P page relative paths.
+# These are FILE REFERENCES only — no game data is hardcoded here.
+# Specialist wizards share SP00092.HTM; abilities are written once per unique file.
+
+_SP_CLASS_FILES = {
+    'Fighter':     'SP/SP00064.HTM',
+    'Paladin':     'SP/SP00065.HTM',
+    'Ranger':      'SP/SP00066.HTM',
+    'Thief':       'SP/SP00068.HTM',
+    'Bard':        'SP/SP00077.HTM',
+    'Cleric':      'SP/SP00084.HTM',
+    'Druid':       'SP/SP00087.HTM',
+    'Mage':        'SP/SP00089.HTM',
+    # Standard PHB specialist wizards share SP00092
+    'Abjurer':     'SP/SP00092.HTM',
+    'Conjurer':    'SP/SP00092.HTM',
+    'Diviner':     'SP/SP00092.HTM',
+    'Enchanter':   'SP/SP00092.HTM',
+    'Illusionist': 'SP/SP00092.HTM',
+    'Invoker':     'SP/SP00092.HTM',
+    'Necromancer': 'SP/SP00092.HTM',
+    'Transmuter':  'SP/SP00092.HTM',
+    'Psionicist':  'SP/SP00094.HTM',
+}
+
+# Friendly folder label per unique SP file (for shared pages like specialist wizards)
+_SP_CLASS_FOLDER_LABELS = {
+    'SP/SP00092.HTM': 'Specialist Wizards',
+}
+
+
+def _class_cp_budget(cls_name):
+    """Parse the S&P class page for 'N character points' and return N.
+    Returns None when no CP page is mapped or budget cannot be found."""
+    rel = _SP_CLASS_FILES.get(cls_name)
+    if not rel:
+        return None
+    path = os.path.join(SOURCE_BASE, rel)
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='cp1252') as f:
+        txt = BeautifulSoup(f.read(), 'html.parser').get_text(' ', strip=True)
+    m = re.search(r'(\d+)\s+character\s+points', txt, re.I)
+    return int(m.group(1)) if m else None
+
+
+def _parse_sp_class_abilities_section(sp_rel):
+    """Parse a S&P class page into [(label_with_cost, html), ...].
+    Abilities are red (#ff0000) bold SIZE=3 headings matching '(N):' at end.
+    Descriptions are the normal SIZE=3 text that follows each heading until the
+    next heading or end of content."""
+    path = os.path.join(SOURCE_BASE, sp_rel)
+    if not os.path.exists(path):
+        return []
+    with open(path, 'r', encoding='cp1252') as f:
+        soup = BeautifulSoup(f.read(), 'html.parser')
+
+    # Cost suffix: "(N):", "(N/M):", "(N/M/P):", "(N+):" — colon is part of the heading
+    _COST_RE = re.compile(r'\([\d+/]+\)\s*:?\s*$')
+    out = []
+    current_label  = None
+    current_chunks = []
+
+    def _flush():
+        if current_label and current_chunks:
+            text = ' '.join(current_chunks).strip()
+            if text:
+                out.append((current_label, f'<p>{text}</p>'))
+
+    body = soup.find('body') or soup
+    for elem in body.find_all('font'):
+        color = (elem.get('color') or '').lower()
+        size  = elem.get('size', '')
+        bold  = bool(elem.find('b'))
+        txt   = elem.get_text(' ', strip=True)
+        if not txt:
+            continue
+        if color == '#ff0000' and size == '3' and bold and _COST_RE.search(txt):
+            _flush()
+            current_label  = txt.rstrip(':').strip()
+            current_chunks = []
+        elif size == '3' and color not in ('#ff0000', '#008000') and current_label:
+            current_chunks.append(txt)
+    _flush()
+    return out
+
+
 # ─── Class ability generation ──────────────────────────────────────────────────
 #
 # Each class item gets a set of Ability sub-items (written to adnd2-classes) and
@@ -7396,6 +7489,7 @@ def migrate_classes():
     total_effects   = 0
     total_skill_links = 0
     count = 0
+    written_class_docs = {}   # cls_name → written class item dict (for CP deep-copy)
 
     for cls in classes:
         desc   = _get_class_desc(cls['name'], cls.get('group', ''), class_descs)
@@ -7466,7 +7560,112 @@ def migrate_classes():
         if bucket:
             item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{cls_id}'.encode(), json.dumps(item).encode())
+        written_class_docs[cls['name']] = item
         count += 1
+
+    # ── 2. CP class copies + per-class CP abilities (S&P system) ─────────────
+    cp_classes_folder_id  = make_id()
+    cp_classes_folder     = make_compendium_folder(
+        cp_classes_folder_id, 'Classes (CP)', 'Item', sort=700000)
+    cp_abilities_root_id  = make_id()
+    cp_abilities_root     = make_compendium_folder(
+        cp_abilities_root_id, 'Class CP Abilities', 'Item', sort=800000)
+    db.put(f'!folders!{cp_classes_folder_id}'.encode(),
+           json.dumps(cp_classes_folder).encode())
+    db.put(f'!folders!{cp_abilities_root_id}'.encode(),
+           json.dumps(cp_abilities_root).encode())
+
+    keep_lower_words = {'or', 'and', 'of', 'in', 'the', 'a', 'to', 'with', 'for',
+                        'from', 'on', 'at', 'by'}
+    def _title_case(s):
+        words = s.split()
+        return ' '.join(
+            w.capitalize() if (i == 0 or w.lower() not in keep_lower_words)
+                          else w.lower()
+            for i, w in enumerate(words)
+        )
+
+    cp_classes_written   = 0
+    cp_abilities_written = 0
+    cp_effects_written   = 0
+    # Track which SP files have had their abilities written to avoid duplicates
+    # (all standard specialist wizards share SP00092.HTM).
+    written_sp_files  = {}   # sp_rel → ability_folder_id
+
+    for cls in classes:
+        cls_name = cls['name']
+        sp_rel   = _SP_CLASS_FILES.get(cls_name)
+        src      = written_class_docs.get(cls_name)
+        if not sp_rel or not src:
+            continue
+        cp_budget = _class_cp_budget(cls_name)
+        if cp_budget is None:
+            continue
+
+        # ── CP class copy ─────────────────────────────────────────────────────
+        cp_doc  = json.loads(json.dumps(src))
+        cp_id   = make_id()
+        cp_doc['_id']    = cp_id
+        cp_doc['name']   = f'{cls_name} (CP)'
+        cp_doc['folder'] = cp_classes_folder_id
+        cp_doc['_stats'] = _stats_block()
+        cp_doc['flags']  = dict(src.get('flags') or {})
+        # Strip auto-granted itemList (player buys abilities à la carte)
+        cp_doc['system']['itemList'] = []
+        # Determine the abilities folder label for the banner
+        ab_folder_label = _SP_CLASS_FOLDER_LABELS.get(sp_rel, cls_name)
+        banner = (
+            f'<h2>Character Points budget: {cp_budget} CP</h2>\n'
+            f'<p><em>Spend on class abilities purchased separately '
+            f'from the "{ab_folder_label} CP Abilities" folder.</em></p>\n'
+            f'<hr/>\n'
+        )
+        cp_doc['system']['description'] = (
+            banner + (src['system'].get('description') or ''))
+        db.put(f'!items!{cp_id}'.encode(), json.dumps(cp_doc).encode())
+        cp_classes_written += 1
+
+        # ── Per-class (or per-shared-file) CP abilities folder + items ────────
+        if sp_rel not in written_sp_files:
+            # Create a new abilities sub-folder for this SP file
+            ab_fid = make_id()
+            ab_folder = make_compendium_folder(
+                ab_fid, f'{ab_folder_label} CP Abilities', 'Item',
+                sort=100000 + len(written_sp_files) * 10000,
+                parent=cp_abilities_root_id)
+            db.put(f'!folders!{ab_fid}'.encode(), json.dumps(ab_folder).encode())
+            written_sp_files[sp_rel] = ab_fid
+
+            for label, body_html in _parse_sp_class_abilities_section(sp_rel):
+                # Parse "Name (cost)" format — cost may be N, N/M, N/M/P, or N+
+                m = re.match(r'^(.*?)\s*\(([\d+/]+)\)\s*$',
+                             label.strip())
+                if not m:
+                    continue
+                raw_name  = m.group(1).strip()
+                cost_str  = m.group(2)       # e.g. "5", "5/10", "5+"
+                display   = f'{_title_case(raw_name)} ({cost_str} CP)'
+                icon      = _class_ability_icon(raw_name)
+                mech      = _class_ability_effect_changes(raw_name)
+                acts      = _class_ability_action_groups(raw_name)
+                ab, ef    = make_ability_item(
+                    display, icon,
+                    description=body_html,
+                    effect_changes=(mech or None),
+                    action_groups=(acts or None),
+                )
+                # Store the first numeric cost for flag metadata
+                first_cost = int(re.match(r'\d+', cost_str).group(0))
+                ab['folder'] = ab_fid
+                ab['flags']  = {'adnd2': {'cpCost': first_cost,
+                                          'cpClass': ab_folder_label}}
+                db.put(f'!items!{ab["_id"]}'.encode(),
+                       json.dumps(ab).encode())
+                if ef:
+                    db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
+                           json.dumps(ef).encode())
+                    cp_effects_written += 1
+                cp_abilities_written += 1
 
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
@@ -7475,6 +7674,9 @@ def migrate_classes():
           f"({no_desc} without PHB description)")
     print(f"    {total_abilities} ability items, {total_effects} effects, "
           f"{total_skill_links} thieving-skill links")
+    print(f"    {cp_classes_written} (CP) class copies, "
+          f"{cp_abilities_written} CP abilities "
+          f"({cp_effects_written} with mechanical effects)")
     return count
 
 
