@@ -6909,18 +6909,459 @@ def _get_class_desc(cls_name, group, class_descs):
     return ''
 
 
+# ─── Class ability generation ──────────────────────────────────────────────────
+#
+# Each class item gets a set of Ability sub-items (written to adnd2-classes) and
+# cross-pack Skill links (pointing to adnd2-skills thieving-skill items).
+#
+# Pattern mirrors the race ability system: _class_abilities_for() returns a list
+# of spec dicts; migrate_classes() mints the Ability/Effect documents and builds
+# the class item's system.itemList.
+#
+# COPYRIGHT: all labels, HTML descriptions, and numeric values are read at runtime
+# from the PHB/S&P HTML files. Only parse anchors (regex patterns, English section
+# names) and ARS schema keys are hardcoded below.
+
+# ── Regex patterns that map a PHB <strong> lead sentence to an ability name ──
+# Key: the pattern itself is a REFERENCE (what to look for), not game content.
+_CLASS_ABILITY_LEAD_RE = [
+    (re.compile(r'detect.*evil',               re.I), 'Detect Evil'),
+    (re.compile(r'saving throw',               re.I), 'Saving Throw Bonus'),
+    (re.compile(r'lay.*hands|laying.*hands',   re.I), 'Lay on Hands'),
+    (re.compile(r'cure.*disease',              re.I), 'Cure Disease'),
+    (re.compile(r'aura of protection',         re.I), 'Protection From Evil, 10\' Radius'),
+    (re.compile(r'holy sword',                 re.I), 'Circle of Power'),
+    (re.compile(r'turn undead',                re.I), 'Turn Undead'),
+    (re.compile(r'war.?horse',                 re.I), 'War Horse'),
+    (re.compile(r'paladin.*priest spells|priest spells.*paladin', re.I),
+     'Priest Spells'),
+    (re.compile(r'not possess.*magical|magical items',  re.I), 'Code of Conduct'),
+    (re.compile(r'never retains wealth|retains wealth', re.I), 'Code of Conduct'),
+    (re.compile(r'must tithe',                 re.I), 'Code of Conduct'),
+    (re.compile(r'does not attract.*follower',  re.I), 'Code of Conduct'),
+    (re.compile(r'employ only.*henchmen',       re.I), 'Code of Conduct'),
+    # Ranger bullets
+    (re.compile(r'trained.*untamed|animal.*empathy|adept.*creatures', re.I),
+     'Animal Empathy'),
+    (re.compile(r'ranger.*priest spells|priest spells.*ranger|ranger.*learn priest', re.I),
+     'Priest Spells'),
+    (re.compile(r'castle|fort|stronghold',     re.I), 'Stronghold'),
+    (re.compile(r'attract.*follower|followers.*arrive|attracts.*follower', re.I),
+     'Followers'),
+    (re.compile(r'code of behavior|ranger.*code',  re.I), 'Code of Conduct'),
+    # Bard skill bullets (already clean names)
+    (re.compile(r'^Climb Walls$',              re.I), 'Climb Walls'),
+    (re.compile(r'^Detect Noise$',             re.I), 'Detect Noise'),
+    (re.compile(r'^Pick Pockets$',             re.I), 'Pick Pockets'),
+    (re.compile(r'^Read Languages$',           re.I), 'Read Languages'),
+    # Bard special abilities
+    (re.compile(r'influence.*reaction',        re.I), 'Influence Reactions'),
+    (re.compile(r'music.*poetry|rally.*morale|bard.*inspire', re.I), 'Rally Allies'),
+    (re.compile(r'counter.*effect.*song|counter.*songs', re.I), 'Counter Song'),
+    (re.compile(r'bards.*learn.*little|bit of everything|legend.*lore', re.I), 'Legend Lore'),
+    (re.compile(r'wizard.*spell.*bard|bard.*cast.*spell', re.I), 'Wizard Spell Use'),
+]
+
+# Thieving skill names used as parse anchors when linking to adnd2-skills items
+_THIEVING_SKILL_NAMES = [
+    'Pick Pockets', 'Open Locks', 'Find/Remove Traps',
+    'Move Silently', 'Hide in Shadows', 'Detect Noise',
+    'Climb Walls', 'Read Languages',
+]
+# Subset granted to bards
+_BARD_THIEVING_SKILLS = frozenset({
+    'Climb Walls', 'Detect Noise', 'Pick Pockets', 'Read Languages',
+})
+
+
+def _class_ability_icon(name):
+    """Pick a Foundry SVG/webp icon for a class ability from its canonical name."""
+    low = name.lower()
+    if 'detect evil'   in low: return 'icons/magic/perception/eye-ringed-glow-yellow.webp'
+    if 'lay on hands'  in low: return 'icons/magic/life/heart-glowing-red.webp'
+    if 'cure disease'  in low: return 'icons/magic/life/cross-yellow.webp'
+    if 'turn undead'   in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'protection'    in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'saving throw'  in low: return 'icons/skills/social/intimidation-impressing.webp'
+    if 'circle of power' in low: return 'icons/equipment/weapon/sword-holy.webp'
+    if 'war horse' in low or ('horse' in low and 'war' in low):
+        return 'icons/environment/creatures/horse.webp'
+    if 'priest spell'  in low: return 'icons/magic/air/air-burst-spiral-teal-blue.webp'
+    if 'wizard spell'  in low: return 'icons/magic/symbols/runes-star-blue.webp'
+    if 'code of conduct' in low or 'code of behavior' in low:
+        return 'icons/equipment/shield/shield-flat-kite-blue.webp'
+    if 'follower'      in low: return 'icons/skills/social/diplomacy-handshake.webp'
+    if 'stronghold'    in low: return 'icons/environment/settlement/castle.webp'
+    if 'animal'        in low: return 'icons/magic/nature/wolf-paw-glow-orange-green.webp'
+    if 'tracking'      in low: return 'icons/magic/nature/wolf-paw-glow-orange-green.webp'
+    if 'stealth' in low or 'hide in shadow' in low or 'move silently' in low:
+        return 'icons/magic/air/air-smoke-casting.webp'
+    if 'shapechange'   in low or 'shape' in low:
+        return 'icons/magic/nature/plant-seed-magic-grassy.webp'
+    if 'identify'      in low: return 'icons/magic/nature/leaf-glow-triple-green.webp'
+    if 'pass without trace' in low: return 'icons/magic/nature/vines-weave-green.webp'
+    if 'immunity'      in low or 'immune'  in low:
+        return 'icons/magic/defensive/shield-barrier-glowing-triangle-green.webp'
+    if 'language'      in low: return 'icons/skills/trades/academics-merchant-map-tan.webp'
+    if 'backstab'      in low: return 'icons/weapons/daggers/dagger-curved-black.webp'
+    if 'song'  in low or 'music' in low or 'bard' in low or 'rally' in low:
+        return 'icons/equipment/instrument/lute-gold-brown.webp'
+    if 'lore' in low or 'legend' in low:
+        return 'icons/skills/trades/academics-merchant-map-tan.webp'
+    if 'influence' in low or 'reaction' in low:
+        return 'icons/skills/social/diplomacy-handshake.webp'
+    if 'counter' in low:
+        return 'icons/equipment/instrument/lute-gold-brown.webp'
+    if 'climb walls' in low or 'open locks' in low or 'pick pocket' in low or 'find' in low:
+        return 'icons/skills/trades/locksmith-lockpicking-key-sword.webp'
+    if 'detect noise' in low or 'read language' in low:
+        return 'icons/skills/trades/academics-merchant-map-tan.webp'
+    if 'fire' in low or 'lightning' in low or 'electrical' in low:
+        return 'icons/magic/fire/flame-burning-campfire-orange.webp'
+    return 'icons/svg/book.svg'
+
+
+def _class_ability_effect_changes(name, lead_text=''):
+    """Map a class ability canonical name to ARS v14 effect change dicts.
+    Parses any numeric bonus from lead_text at runtime rather than hardcoding."""
+    low = name.lower()
+
+    def _save(formula, props=''):
+        return [{'key': 'system.mods.saves.all', 'type': 'custom',
+                 'value': {'formula': formula, 'properties': props},
+                 'priority': 20, 'phase': 'initial', 'last': ''}]
+
+    if 'saving throw bonus' in low:
+        # Parse the bonus magnitude from the PHB text at runtime
+        m = re.search(r'\+\s*(\d+)', lead_text)
+        bonus = m.group(1) if m else '1'
+        return _save(bonus)
+
+    if 'fire' in low and ('electrical' in low or 'lightning' in low):
+        m = re.search(r'\+\s*(\d+)', lead_text)
+        bonus = m.group(1) if m else '2'
+        return _save(bonus, 'fire,lightning')
+
+    return []
+
+
+def _class_ability_action_groups(name):
+    """Build ARS action groups for class abilities with clickable mechanics."""
+    low = name.lower()
+    icon = _class_ability_icon(name)
+
+    if 'turn undead' in low:
+        return [_make_action_group('Turn Undead', icon, [
+            _make_action('Turn Undead', type_='use', targeting='template',
+                         img=icon, save_type='none'),
+        ])]
+
+    if 'lay on hands' in low:
+        return [_make_action_group('Lay on Hands', icon, [
+            _make_action('Heal', type_='heal', targeting='single', img=icon,
+                         formula='@rank.levels.max*2'),
+        ])]
+
+    if 'cure disease' in low:
+        return [_make_action_group('Cure Disease', icon, [
+            _make_action('Cure Disease', type_='use', targeting='single',
+                         img=icon, save_type='none'),
+        ])]
+
+    if 'shapechange' in low:
+        return [_make_action_group('Shapechange', icon, [
+            _make_action('Shapechange', type_='use', targeting='self',
+                         img=icon, charges_per_day=3),
+        ])]
+
+    if 'influence reactions' in low:
+        return [_make_action_group('Influence Reactions', icon, [
+            _make_action('Influence Reactions', type_='use', targeting='template',
+                         img=icon),
+        ])]
+
+    if 'counter song' in low:
+        return [_make_action_group('Counter Song', icon, [
+            _make_action('Counter Song', type_='use', targeting='self',
+                         img=icon),
+        ])]
+
+    if 'legend lore' in low:
+        return [_make_action_group('Legend Lore', icon, [
+            _make_action('Legend Lore', type_='use', targeting='self',
+                         img=icon),
+        ])]
+
+    return []
+
+
+def _parse_strong_ability_blocks(html):
+    """Extract (lead_text, enclosing_p_html) pairs from a class HTML page.
+    Each <strong> element is a bullet lead; its enclosing <p> is the full block."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    blocks = []
+    seen_leads = set()
+    for strong in soup.find_all('strong'):
+        lead = strong.get_text(strip=True)
+        if not lead or len(lead) < 5 or lead in seen_leads:
+            continue
+        seen_leads.add(lead)
+        # Use the enclosing paragraph for the full block
+        parent = strong.parent
+        block_html = str(parent) if parent and parent.name else str(strong)
+        blocks.append((lead, block_html))
+    return blocks
+
+
+def _ranger_extra_abilities(html):
+    """Extract Ranger prose abilities (tracking, stealth, species enemy) that
+    are not in <strong> bullet leads. Returns [(name, para_html), ...]."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    extras = []
+    seen = set()
+    # Anchors: English concepts used as parse references (not copyrighted values)
+    ANCHORS = [
+        (re.compile(r'tracking proficiency|has a tracking|tracking skill', re.I),
+         'Tracking'),
+        (re.compile(r'move with great stealth|hiding and moving silently|'
+                    r'move silently.*natural|hide.*natural surroundings', re.I),
+         'Stealth'),
+        (re.compile(r'particular creature|species enemy|marauds their homeland', re.I),
+         'Species Enemy'),
+    ]
+    for para in soup.find_all('p'):
+        text = para.get_text(strip=True)
+        for pat, name in ANCHORS:
+            if pat.search(text) and name not in seen:
+                seen.add(name)
+                extras.append((name, str(para)))
+                break
+    return extras
+
+
+def _druid_granted_abilities():
+    """Parse PHB00088.HTM (Granted Powers-- Druid) into [(name, para_html), ...]
+    at runtime. Abilities are separated by 'He can...' or 'He gains...' sentences."""
+    book_dir = os.path.join(SOURCE_BASE, 'PHB')
+    path = os.path.join(book_dir, 'PHB00088.HTM')
+    if not os.path.exists(path):
+        return []
+    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    html = clean_html_file(path, 'PHB', src_files)
+    soup = BeautifulSoup(html, 'html.parser')
+
+    ANCHORS = [
+        (re.compile(r'saving throw.*fire|fire.*electrical|fire.*attack', re.I),
+         'Saving Throw Bonus vs Fire/Electricity'),
+        (re.compile(r'secret language|druidic language', re.I), 'Druidic Language'),
+        (re.compile(r'identify plants|plants.*animals.*pure water', re.I),
+         'Identify Plants, Animals, and Pure Water'),
+        (re.compile(r'pass through overgrown|pass.*without.*trail', re.I),
+         'Pass Without Trace'),
+        (re.compile(r'language.*woodland|woodland.*creature.*language', re.I),
+         'Woodland Creature Languages'),
+        (re.compile(r'immune.*charm.*woodland|charm.*woodland', re.I),
+         'Immunity to Charm'),
+        (re.compile(r'shapechange|shape.*reptile|reptile.*bird.*mammal', re.I),
+         'Shapechange'),
+    ]
+
+    results = []
+    seen = set()
+    for para in soup.find_all('p'):
+        text = para.get_text(strip=True)
+        if not text:
+            continue
+        for pat, name in ANCHORS:
+            if pat.search(text) and name not in seen:
+                seen.add(name)
+                results.append((name, str(para), text))
+                break
+    return results
+
+
+def _cleric_turn_undead_block(html):
+    """Extract the paragraph containing Turn Undead from the Cleric description."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, 'html.parser')
+    pat = re.compile(r'turn undead', re.I)
+    for para in soup.find_all('p'):
+        if pat.search(para.get_text()):
+            return str(para)
+    return None
+
+
+def _thief_backstab_block(html):
+    """Extract Backstab ability block from PHB class text or PHB00100 explanations."""
+    # Try primary class description first
+    if html:
+        soup = BeautifulSoup(html, 'html.parser')
+        pat = re.compile(r'backstab', re.I)
+        for para in soup.find_all('p'):
+            if pat.search(para.get_text()):
+                return str(para)
+    # Fall back to thieving skill explanations page
+    book_dir = os.path.join(SOURCE_BASE, 'PHB')
+    path = os.path.join(book_dir, 'PHB00100.HTM')
+    if not os.path.exists(path):
+        return None
+    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    expl_html = clean_html_file(path, 'PHB', src_files)
+    soup2 = BeautifulSoup(expl_html, 'html.parser')
+    pat = re.compile(r'backstab', re.I)
+    paras = []
+    capture = False
+    for tag in soup2.find_all(['p', 'h3', 'h4', 'strong']):
+        if pat.search(tag.get_text()) and tag.name in ('strong', 'h3', 'h4'):
+            capture = True
+        if capture and tag.name == 'p':
+            paras.append(str(tag))
+            if len(paras) >= 3:
+                break
+    return ''.join(paras) if paras else None
+
+
+def _load_skill_link_map():
+    """Build {skill_name_lower → (id, name, img, pack)} from the adnd2-skills
+    staging JSON, written by migrate_skills() earlier in the run."""
+    skills_src = os.path.join(_PACK_SRC_BASE,
+                              os.path.basename(OUTPUT_PACKS['skills']))
+    result = {}
+    if not os.path.isdir(skills_src):
+        return result
+    for fn in os.listdir(skills_src):
+        if not fn.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(skills_src, fn), encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except Exception:
+            continue
+        if doc.get('type') != 'skill':
+            continue
+        name = doc.get('name', '')
+        if name:
+            result[name.lower()] = (doc['_id'], name, doc.get('img', ''), 'skills')
+    return result
+
+
+def _class_abilities_for(cls, class_descs):
+    """Return a list of ability spec dicts for a CLASS.DAT class record.
+    Each spec has: name, description (HTML), effect_changes, action_groups,
+    icon, and optionally skill_link=True (for thieving-skill itemList entries)."""
+    group = cls.get('group', '')
+    name  = cls.get('name', '')
+    desc_html = _get_class_desc(name, group, class_descs)
+    specs = []
+    seen_names = set()
+
+    def _push(spec_name, desc='', chg=None, acts=None, lead=''):
+        if not spec_name or spec_name in seen_names:
+            return
+        seen_names.add(spec_name)
+        icon = _class_ability_icon(spec_name)
+        if not chg:
+            chg = _class_ability_effect_changes(spec_name, lead)
+        if not acts:
+            acts = _class_ability_action_groups(spec_name)
+        specs.append({
+            'name':           spec_name,
+            'description':    desc,
+            'effect_changes': chg or None,
+            'action_groups':  acts or None,
+            'icon':           icon,
+        })
+
+    # ── Paladin & Ranger: <strong> bullet blocks + prose extras ──────────────
+    if name.lower() in ('paladin', 'ranger'):
+        blocks = _parse_strong_ability_blocks(desc_html)
+        for lead, block_html in blocks:
+            ability_name = None
+            for pat, aname in _CLASS_ABILITY_LEAD_RE:
+                if pat.search(lead):
+                    ability_name = aname
+                    break
+            if not ability_name:
+                words = re.sub(r'[,.].*', '', lead).split()[:4]
+                ability_name = ' '.join(w.capitalize() for w in words) if words else lead[:30]
+            _push(ability_name, block_html, lead=lead)
+        if name.lower() == 'ranger':
+            for extra_name, extra_html in _ranger_extra_abilities(desc_html):
+                _push(extra_name, extra_html)
+
+    # ── Bard: <strong> blocks EXCEPT the thieving-skill names (those become
+    #    cross-pack skill links in migrate_classes, not duplicate ability items)
+    elif name.lower() == 'bard':
+        blocks = _parse_strong_ability_blocks(desc_html)
+        for lead, block_html in blocks:
+            # Skip pure skill-name bullets — they become itemList skill links
+            if lead in _BARD_THIEVING_SKILLS:
+                continue
+            ability_name = None
+            for pat, aname in _CLASS_ABILITY_LEAD_RE:
+                if pat.search(lead):
+                    ability_name = aname
+                    break
+            if not ability_name:
+                words = re.sub(r'[,.].*', '', lead).split()[:4]
+                ability_name = ' '.join(w.capitalize() for w in words) if words else lead[:30]
+            _push(ability_name, block_html, lead=lead)
+
+    # ── Thief: Backstab ability (thieving skills themselves become skill links) ─
+    elif name.lower() == 'thief':
+        backstab_html = _thief_backstab_block(desc_html)
+        if backstab_html:
+            _push('Backstab', backstab_html)
+
+    # ── Cleric: Turn Undead from prose ────────────────────────────────────────
+    elif name.lower() == 'cleric':
+        turn_block = _cleric_turn_undead_block(desc_html)
+        _push('Turn Undead', turn_block or '')
+        _push('Priest Spells')
+
+    # ── Druid: granted powers from PHB00088 ───────────────────────────────────
+    elif name.lower() == 'druid':
+        for ab_name, para_html, para_text in _druid_granted_abilities():
+            chg = _class_ability_effect_changes(ab_name, para_text)
+            _push(ab_name, para_html, chg=chg)
+
+    return specs
+
+
+def _class_thieving_skills_for(cls_name):
+    """Return the list of thieving skill names to auto-grant for a class.
+    Thief gets all 8; Bard gets the subset defined in _BARD_THIEVING_SKILLS."""
+    low = cls_name.lower()
+    if low == 'thief':
+        return list(_THIEVING_SKILL_NAMES)
+    if low == 'bard':
+        return [s for s in _THIEVING_SKILL_NAMES if s in _BARD_THIEVING_SKILLS]
+    return []
+
+
 def migrate_classes():
     """Phase 3: write the classes pack — a `class` Item per CLASS.DAT record,
-    foldered by group (Warriors/Rogues/Priests/Wizards/Psionicists). Returns count."""
+    foldered by group (Warriors/Rogues/Priests/Wizards/Psionicists).
+    Each class also gets Ability sub-items (descriptive + mechanical effects where
+    parseable) and cross-pack Skill links to thieving skills (Thief/Bard).
+    Must run AFTER migrate_skills() so the skill staging JSON is readable.
+    Returns count."""
     print("\n=== Classes (CLASS.DAT) ===")
     classes = parse_classes()
     if not classes:
         print("  No classes parsed."); return 0
     class_descs = _build_phb_class_desc_index()
     print(f"  PHB class descriptions indexed: {len(class_descs)} titles")
+    # Load skill link map (requires migrate_skills() to have run first)
+    skill_map = _load_skill_link_map()
+    print(f"  Skills available for thieving-skill links: {len(skill_map)}")
+
     db = _open_pack(OUTPUT_PACKS['classes'])
-    # Folder hierarchy by class group (from CLASS.DAT). Specialist wizards
-    # all live under 'Wizard' too; 'Psionicist' is its own group from PSIONIC.DAT.
     folders = {}
     for label, sort in [('Warriors', 100000), ('Rogues', 200000),
                         ('Priests', 300000), ('Wizards', 400000),
@@ -6935,22 +7376,76 @@ def migrate_classes():
         'psionicist': 'Psionicists',
     }
     no_desc = 0
+    total_abilities = 0
+    total_effects   = 0
+    total_skill_links = 0
     count = 0
+
     for cls in classes:
-        desc  = _get_class_desc(cls['name'], cls.get('group', ''), class_descs)
+        desc   = _get_class_desc(cls['name'], cls.get('group', ''), class_descs)
         if not desc:
             no_desc += 1
-        item  = make_class_item(cls, description=desc)
-        bucket = GROUP_FOLDER.get(cls.get('group',''), None)
+        item   = make_class_item(cls, description=desc)
+        cls_id = item['_id']
+        cls_uuid = f"Compendium.{MODULE_ID}.adnd2-classes.Item.{cls_id}"
+
+        # ── Generate and write Ability sub-items ─────────────────────────────
+        item_list_refs = []
+        for spec in _class_abilities_for(cls, class_descs):
+            ab, ef = make_ability_item(
+                spec['name'], spec['icon'],
+                description=spec['description'],
+                effect_changes=spec['effect_changes'],
+                action_groups=spec['action_groups'],
+            )
+            db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
+            if ef:
+                db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
+                       json.dumps(ef).encode())
+                total_effects += 1
+            total_abilities += 1
+            item_list_refs.append({
+                'id':       ab['_id'],
+                'uuid':     f'Item.{ab["_id"]}',
+                'sourceuuid': cls_uuid,
+                'type':     'ability',
+                'name':     spec['name'],
+                'img':      spec['icon'],
+                'level':    '0',
+            })
+
+        # ── Add thieving skill cross-pack links (Thief and Bard) ─────────────
+        for skill_name in _class_thieving_skills_for(cls['name']):
+            entry = skill_map.get(skill_name.lower())
+            if not entry:
+                continue
+            sid, sname, simg, spack = entry
+            item_list_refs.append({
+                'id':       sid,
+                'uuid':     f'Compendium.{MODULE_ID}.adnd2-{spack}.Item.{sid}',
+                'sourceuuid': cls_uuid,
+                'type':     'skill',
+                'name':     sname,
+                'img':      simg,
+                'level':    '0',
+            })
+            total_skill_links += 1
+
+        item['system']['itemList'] = item_list_refs
+
+        bucket = GROUP_FOLDER.get(cls.get('group', ''), None)
         if bucket:
             item['folder'] = folders[bucket]['_id']
-        db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+        db.put(f'!items!{cls_id}'.encode(), json.dumps(item).encode())
         count += 1
+
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
     print(f"  → {count} classes in {len(folders)} folders "
           f"({no_desc} without PHB description)")
+    print(f"    {total_abilities} ability items, {total_effects} effects, "
+          f"{total_skill_links} thieving-skill links")
     return count
 
 
@@ -8707,13 +9202,14 @@ def main():
         print(f"{'='*60}")
         try:
             phase3_stats['races']         = migrate_races()
-            phase3_stats['classes']       = migrate_classes()
             phase3_stats['spells']        = migrate_spells()
             phase3_stats['powers']        = migrate_psionics()
             phase3_stats['items']         = migrate_items()
             phase3_stats['monsters']      = migrate_monsters()
             phase3_stats['proficiencies'] = migrate_proficiencies()
             phase3_stats['skills']        = migrate_skills()
+            # classes runs after skills so it can link thieving skills cross-pack
+            phase3_stats['classes']       = migrate_classes()
             phase3_stats['backgrounds']   = migrate_kits()
             phase3_stats['treasure']      = migrate_treasure()
         except Exception as e:
