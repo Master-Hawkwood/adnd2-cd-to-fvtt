@@ -1315,6 +1315,7 @@ def parse_kits():
         if not nm:
             continue
         name = re.sub(r'^[^0-9A-Za-z]+', '', nm.group().decode('latin-1')).strip()
+        name = re.sub(r'\s*\(CRE\)\s*$', '', name, flags=re.I).strip()
         if not name or name.lower() == 'none':
             continue
         lm = _KIT_LABEL_RE.search(rec, 0, cut)
