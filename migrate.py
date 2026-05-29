@@ -2067,6 +2067,11 @@ def _normalize_spell_name_for_lookup(name):
         if kk != k: out.append(kk)
         kk = k.replace('ensarement', 'ensnarement')
         if kk != k: out.append(kk)
+        # airboat ↔ air boat (one word vs two in TOM HTML title)
+        kk = k.replace('airboat', 'air boat')
+        if kk != k: out.append(kk)
+        kk = k.replace('air boat', 'airboat')
+        if kk != k: out.append(kk)
         # vs ↔ versus
         kk = re.sub(r'\bvs\b\.?', 'versus', k)
         if kk != k: out.append(kk)
