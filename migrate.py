@@ -7962,8 +7962,9 @@ def migrate_spells():
 
 
 def migrate_psionics():
-    """Phase 3: write the powers pack — a `power` Item per PSIONIC.DAT record.
-    Description priority: S&P HTML (richer, formatted) > DAT plain text > ''.
+    """Phase 3: write the powers pack — a `power` Item per PSIONIC.DAT record,
+    foldered by discipline (Clairsentience / Psychokinesis / Psychometabolism /
+    Psychoportation / Telepathy). Description priority: S&P HTML > DAT text > ''.
     Returns count."""
     print("\n=== Psionic Powers (PSIONIC.DAT) ===")
     powers = parse_psionics()
@@ -7972,28 +7973,40 @@ def migrate_psionics():
     sp_index = _build_sp_psionic_index()
     print(f"  S&P power pages indexed: {len(sp_index)}")
     db = _open_pack(OUTPUT_PACKS['powers'])
-    sp_hits = 0
-    dat_hits = 0
-    no_desc  = 0
-    count = 0
+
+    # One folder per discipline, in canonical order
+    disc_folders = {}
+    for sort_i, (disc_idx, disc_name) in enumerate(_DISC_NAMES.items()):
+        fid = make_id()
+        disc_folders[disc_idx] = fid
+        folder = make_compendium_folder(fid, disc_name, 'Item', sort=sort_i * 1000)
+        db.put(f'!folders!{fid}'.encode(), json.dumps(folder).encode())
+    # Fallback folder for powers without a recognised discipline
+    other_fid = make_id()
+    disc_folders[-1] = other_fid
+    other_folder = make_compendium_folder(other_fid, 'Other', 'Item',
+                                          sort=len(_DISC_NAMES) * 1000)
+    db.put(f'!folders!{other_fid}'.encode(), json.dumps(other_folder).encode())
+
+    sp_hits = dat_hits = no_desc = count = 0
     for power in powers:
         name_key = power['name'].lower()
         sp_html  = sp_index.get(name_key, '')
         dat_text = power.get('description', '')
         if sp_html:
-            desc = sp_html
-            sp_hits += 1
+            desc = sp_html;  sp_hits += 1
         elif dat_text:
-            desc = dat_text
-            dat_hits += 1
+            desc = dat_text; dat_hits += 1
         else:
-            desc = ''
-            no_desc += 1
+            desc = '';       no_desc += 1
         item = make_power_item(power, description=desc)
+        disc_idx = power.get('discipline', -1)
+        item['folder'] = disc_folders.get(disc_idx, other_fid)
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
     db.close()
-    print(f"  → {count} powers  (S&P HTML: {sp_hits}, DAT text: {dat_hits}, none: {no_desc})")
+    print(f"  → {count} powers in {len(disc_folders)} folders  "
+          f"(S&P HTML: {sp_hits}, DAT text: {dat_hits}, none: {no_desc})")
     return count
 
 
