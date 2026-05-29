@@ -2062,6 +2062,11 @@ def _normalize_spell_name_for_lookup(name):
         # hovering road ↔ hovering raod
         kk = k.replace('hovering road', 'hovering raod')
         if kk != k: out.append(kk)
+        # ensnarement ↔ ensarement (missing 'n' in HTML title)
+        kk = k.replace('ensnarement', 'ensarement')
+        if kk != k: out.append(kk)
+        kk = k.replace('ensarement', 'ensnarement')
+        if kk != k: out.append(kk)
         # vs ↔ versus
         kk = re.sub(r'\bvs\b\.?', 'versus', k)
         if kk != k: out.append(kk)
