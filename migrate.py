@@ -5650,24 +5650,25 @@ def _spell_effect_action_type(name):
 
 
 def _make_spell_action_groups(name, save_type, damage_formula,
-                              targeting='single'):
+                              targeting='single', img=''):
     """Build the actionGroup(s) for a spell item. Minimum: one 'cast'
     action posting a chat card (with the spell's save type so the GM gets
     the right Roll Save button). When a dice formula was sniffed from
     the description, append either a 'heal' or 'damage' action depending
-    on the spell name (Cure/Cause/etc.), chained behind the cast."""
+    on the spell name (Cure/Cause/etc.), chained behind the cast.
+    `img` is the spell item's icon, propagated to the group and cast action."""
     actions = [
-        _make_action(name, type_='cast', targeting=targeting,
+        _make_action(name, type_='cast', img=img, targeting=targeting,
                      save_type=save_type, save_formula=''),
     ]
     if damage_formula:
         eff_type = _spell_effect_action_type(name)
         label    = 'Healing' if eff_type == 'heal' else 'Damage'
         actions.append(
-            _make_action(label, type_=eff_type, targeting=targeting,
+            _make_action(label, type_=eff_type, img=img, targeting=targeting,
                          formula=damage_formula, damage_type='')
         )
-    return [_make_action_group(name, '', actions)]
+    return [_make_action_group(name, img, actions)]
 
 
 def _parse_spell_components(raw):
@@ -5712,11 +5713,12 @@ def make_spell_item(spell, desc_override_rel=None):
     # "Arcane"). It must be set explicitly: omitting it silently makes every
     # priest spell "Arcane" (OSRIC populates it on all 476 of its spells, and
     # school-vs-sphere inference is unreliable — divine spells can carry both).
+    spell_img = pick_spell_icon(spell['name'], school, sphere)
     return {
         "_id": item_id,
         "name": spell['name'],
         "type": "spell",
-        "img": pick_spell_icon(spell['name'], school, sphere),
+        "img": spell_img,
         "system": {
             "description":  description,
             "type":         spell_type,
@@ -5732,7 +5734,7 @@ def make_spell_item(spell, desc_override_rel=None):
             "learned":      False,
             "actionGroups": _make_spell_action_groups(
                                 spell['name'], save_type, dmg,
-                                targeting=targeting),
+                                targeting=targeting, img=spell_img),
             # itemList stays empty here; migrate_spells fills it in a
             # post-pass when the spell is the primary of a true reversible
             # pair, so a PC who memorizes it auto-receives the reverse.
