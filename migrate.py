@@ -1902,6 +1902,19 @@ _ANCHORED_SPELL_RE = re.compile(
     re.I,
 )
 
+# S&M / SP compilation pages use <A NAME> followed by a colored heading FONT
+# (no <B> tag). E.g. SM00259: <A NAME="..."></A></FONT><FONT COLOR="#ff0000" SIZE="4">
+# <P></P>Cat's Grace<P></P></FONT>
+_ANCHORED_HEADING_RE = re.compile(
+    r'<A\s+NAME="([^"]+)"\s*></A>'              # anchor
+    r'(?:[^<]*<[^>]+>)*?'                       # optional closing/opening tags
+    r'\s*<FONT[^>]+COLOR="#ff0000"[^>]+SIZE="4"[^>]*>'  # red SIZE=4 font
+    r'\s*(?:<P></P>\s*)?'                       # optional empty paragraph
+    r'([A-Z][^\n<]{2,50}?)'                     # spell name (starts uppercase)
+    r'\s*(?:<P></P>)?\s*</FONT>',               # closing font
+    re.I,
+)
+
 
 def html_title_index(book_key, prefix):
     """Build/cache an index of {normalized_name: page_entry} for one book.
@@ -1945,12 +1958,15 @@ def html_title_index(book_key, prefix):
             with open(filepath, 'r', encoding='cp1252') as f:
                 raw = f.read()
             anchors = list(_ANCHORED_SPELL_RE.finditer(raw))
-            if not anchors: continue
-            for i, m in enumerate(anchors):
-                aname = m.group(2).strip().rstrip(':')   # strip trailing colon from DMG anchors
+            # Also scan for S&M / SP colored-heading anchors (no <B> tag)
+            heading_anchors = list(_ANCHORED_HEADING_RE.finditer(raw))
+            all_anchors = sorted(anchors + heading_anchors, key=lambda m: m.start())
+            if not all_anchors: continue
+            for i, m in enumerate(all_anchors):
+                aname = m.group(2).strip().rstrip(':')
                 if not (3 <= len(aname) <= 60): continue
                 start = m.start()
-                end = anchors[i+1].start() if i+1 < len(anchors) else len(raw)
+                end = all_anchors[i+1].start() if i+1 < len(all_anchors) else len(raw)
                 key = aname.lower()
                 cur = index.get(key)
                 if cur is None or cur[0] < 2:
