@@ -6975,47 +6975,48 @@ _BARD_THIEVING_SKILLS = frozenset({
 
 
 def _class_ability_icon(name):
-    """Pick a Foundry SVG/webp icon for a class ability from its canonical name."""
+    """Pick a verified Foundry webp icon for a class ability from its canonical name.
+    All paths validated against FVTT/public/icons/."""
     low = name.lower()
-    if 'detect evil'   in low: return 'icons/magic/perception/eye-ringed-glow-yellow.webp'
-    if 'lay on hands'  in low: return 'icons/magic/life/heart-glowing-red.webp'
-    if 'cure disease'  in low: return 'icons/magic/life/cross-yellow.webp'
-    if 'turn undead'   in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
-    if 'protection'    in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
-    if 'saving throw'  in low: return 'icons/skills/social/intimidation-impressing.webp'
-    if 'circle of power' in low: return 'icons/equipment/weapon/sword-holy.webp'
+    if 'detect evil'      in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'lay on hands'     in low: return 'icons/magic/life/heart-glowing-red.webp'
+    if 'cure disease'     in low: return 'icons/magic/life/cross-yellow-green.webp'
+    if 'turn undead'      in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'protection'       in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'saving throw'     in low: return 'icons/skills/social/intimidation-impressing.webp'
+    if 'circle of power'  in low: return 'icons/magic/holy/prayer-hands-glowing-yellow-white.webp'
     if 'war horse' in low or ('horse' in low and 'war' in low):
-        return 'icons/environment/creatures/horse.webp'
-    if 'priest spell'  in low: return 'icons/magic/air/air-burst-spiral-teal-blue.webp'
-    if 'wizard spell'  in low: return 'icons/magic/symbols/runes-star-blue.webp'
+        return 'icons/environment/creatures/horse-brown.webp'
+    if 'priest spell'     in low: return 'icons/magic/air/air-burst-spiral-teal-green.webp'
+    if 'wizard spell'     in low: return 'icons/magic/symbols/runes-star-blue.webp'
     if 'code of conduct' in low or 'code of behavior' in low:
-        return 'icons/equipment/shield/shield-flat-kite-blue.webp'
-    if 'follower'      in low: return 'icons/skills/social/diplomacy-handshake.webp'
-    if 'stronghold'    in low: return 'icons/environment/settlement/castle.webp'
-    if 'animal'        in low: return 'icons/magic/nature/wolf-paw-glow-orange-green.webp'
-    if 'tracking'      in low: return 'icons/magic/nature/wolf-paw-glow-orange-green.webp'
+        return 'icons/equipment/shield/heater-wooden-blue.webp'
+    if 'follower'         in low: return 'icons/skills/social/diplomacy-handshake.webp'
+    if 'stronghold'       in low: return 'icons/environment/settlement/castle.webp'
+    if 'animal'           in low: return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'tracking'         in low: return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'species enemy'    in low: return 'icons/magic/nature/wolf-paw-glow-large-orange.webp'
     if 'stealth' in low or 'hide in shadow' in low or 'move silently' in low:
         return 'icons/magic/air/air-smoke-casting.webp'
-    if 'shapechange'   in low or 'shape' in low:
-        return 'icons/magic/nature/plant-seed-magic-grassy.webp'
-    if 'identify'      in low: return 'icons/magic/nature/leaf-glow-triple-green.webp'
-    if 'pass without trace' in low: return 'icons/magic/nature/vines-weave-green.webp'
-    if 'immunity'      in low or 'immune'  in low:
+    if 'shapechange'      in low or 'shape' in low:
+        return 'icons/magic/nature/seed-acorn-glowing-green.webp'
+    if 'identify'         in low: return 'icons/magic/nature/leaf-glow-green.webp'
+    if 'pass without trace' in low: return 'icons/magic/nature/vines-thorned-glow-green.webp'
+    if 'immunity'         in low or 'immune'  in low:
         return 'icons/magic/defensive/shield-barrier-glowing-triangle-green.webp'
-    if 'language'      in low: return 'icons/skills/trades/academics-merchant-map-tan.webp'
-    if 'backstab'      in low: return 'icons/weapons/daggers/dagger-curved-black.webp'
+    if 'language'         in low: return 'icons/skills/trades/academics-merchant-scribe.webp'
+    if 'backstab'         in low: return 'icons/weapons/daggers/dagger-curved-black.webp'
     if 'song'  in low or 'music' in low or 'bard' in low or 'rally' in low:
-        return 'icons/equipment/instrument/lute-gold-brown.webp'
+        return 'icons/tools/instruments/harp-gold-glowing.webp'
+    if 'counter'          in low: return 'icons/skills/trades/music-notes-sound-blue.webp'
     if 'lore' in low or 'legend' in low:
-        return 'icons/skills/trades/academics-merchant-map-tan.webp'
+        return 'icons/skills/trades/academics-book-study-purple.webp'
     if 'influence' in low or 'reaction' in low:
         return 'icons/skills/social/diplomacy-handshake.webp'
-    if 'counter' in low:
-        return 'icons/equipment/instrument/lute-gold-brown.webp'
     if 'climb walls' in low or 'open locks' in low or 'pick pocket' in low or 'find' in low:
         return 'icons/skills/trades/locksmith-lockpicking-key-sword.webp'
     if 'detect noise' in low or 'read language' in low:
-        return 'icons/skills/trades/academics-merchant-map-tan.webp'
+        return 'icons/skills/trades/academics-merchant-scribe.webp'
     if 'fire' in low or 'lightning' in low or 'electrical' in low:
         return 'icons/magic/fire/flame-burning-campfire-orange.webp'
     return 'icons/svg/book.svg'
@@ -7381,6 +7382,15 @@ def migrate_classes():
         'wizard':     'Wizards',
         'psionicist': 'Psionicists',
     }
+
+    # ── Ability folder hierarchy: Class Abilities → {ClassName} ──────────────
+    abilities_root_id = make_id()
+    abilities_root = make_compendium_folder(abilities_root_id, 'Class Abilities',
+                                            'Item', sort=600000)
+    folders['Class Abilities'] = abilities_root
+    # One sub-folder per class that has abilities; created lazily below.
+    ability_folders = {}   # cls_name → folder _id
+
     no_desc = 0
     total_abilities = 0
     total_effects   = 0
@@ -7396,14 +7406,27 @@ def migrate_classes():
         cls_uuid = f"Compendium.{MODULE_ID}.adnd2-classes.Item.{cls_id}"
 
         # ── Generate and write Ability sub-items ─────────────────────────────
+        specs = _class_abilities_for(cls, class_descs)
         item_list_refs = []
-        for spec in _class_abilities_for(cls, class_descs):
+        if specs:
+            # Create a per-class ability sub-folder on first use
+            if cls['name'] not in ability_folders:
+                sort_val = count * 1000 + 100
+                ab_fid = make_id()
+                ab_folder = make_compendium_folder(
+                    ab_fid, cls['name'], 'Item',
+                    sort=sort_val, parent=abilities_root_id)
+                ability_folders[cls['name']] = ab_fid
+                db.put(f'!folders!{ab_fid}'.encode(), json.dumps(ab_folder).encode())
+
+        for spec in specs:
             ab, ef = make_ability_item(
                 spec['name'], spec['icon'],
                 description=spec['description'],
                 effect_changes=spec['effect_changes'],
                 action_groups=spec['action_groups'],
             )
+            ab['folder'] = ability_folders.get(cls['name'])
             db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
             if ef:
                 db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
