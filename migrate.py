@@ -2135,9 +2135,30 @@ def _normalize_spell_name_for_lookup(name):
         "detect snares & pits":          "detect snares and pits",
         "proofing vs combustion":        "proofing versus combustion",
         "create food & water":           "create food & drink",
-        # Reverse spells whose DAT name differs from the primary's HTM page title
+        # Reverse spells — mapped to their primary's HTM page title
         "babble":                        "tongues",
         "badberry":                      "goodberry",
+        "attraction":                    "avoidance",
+        "call":                          "dismissal",
+        "chill metal":                   "heat metal",
+        "copy":                          "forget",
+        "destruction":                   "resurrection",
+        "dispel hallucinatory forest":   "hallucinatory forest",
+        "fear ward":                     "fear",
+        "flesh to stone":                "stone to flesh",
+        "freedom":                       "imprisonment",
+        "invulnerability to normal weapons": "globe of invulnerability",
+        "lose the path":                 "find the path",
+        "nightmare":                     "dream",
+        "raise water":                   "lower water",
+        "shadow form":                   "shadow walk",
+        "shrink animal":                 "animal growth",
+        "shrink insect":                 "giant insect",
+        "snakes to sticks":              "sticks to snakes",
+        "stabilize":                     "chaos",
+        "streighten wood":               "warp wood",
+        "temporal reinstatement":        "temporal stasis",
+        "youthful object":               "age object",
     }
     base = keys[0] if keys else n_clean.lower()
     if base in ALIASES:
