@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Build the `adnd2-compendium` Foundry VTT module from a local AD&D 2e Core Rules
-CD-ROM. migrate2.py variant: uses fvtt-cli instead of plyvel for LevelDB writes
-(Windows-friendly). Requires Node.js + npm install -g @foundryvtt/foundryvtt-cli.
+CD-ROM. Uses fvtt-cli instead of plyvel for LevelDB writes (cross-platform).
+Requires Node.js + npm install -g @foundryvtt/foundryvtt-cli.
 Idempotent — each run deletes and regenerates every output pack from scratch.
 
 Target: Foundry VTT v14, system ARS Variant 2 (AD&D 2e / THAC0). Packs are
@@ -14,23 +14,21 @@ script; see the copyright note below):
 
   cd-rom/MACBOOKS/HTML/{BOOK}/*.HTM   rulebook prose (Latin-1/cp1252, FONT-tag
                                       formatting, no CSS). Parsed with BeautifulSoup.
-  cd-rom/DATABASE/*.DAT               structured game data in MFC `CArchive`
-                                      binary format (schema 88+, ~1996). Parsed by
-                                      hand from reverse-engineered offsets — see
-                                      DAT_FORMAT.md. Helpers: parse_mfc_header()
-                                      (count/schema/class header), find_records()
-                                      (split records on the `01 80` + Pascal-name
-                                      object tag), read_pascal()/read_mfc_long_pascal().
+  cd-rom/DATABASE/*.DAT               structured game data in MFC CArchive binary
+                                      format (schema 88+, ~1996). Helpers:
+                                      parse_mfc_header(), find_records(),
+                                      read_pascal()/read_mfc_long_pascal().
   cd-rom/BITMAPS/{EQUIP,MONSTERS,PORTRAIT}/  icon sprite sheets (extracted to PNG).
 
 OUTPUT PACKS (OUTPUT_PACKS): journals, races, classes, items, spells, powers,
-monsters (Actor), proficiencies, skills, treasure (RollTable).
+monsters (Actor), proficiencies, skills, backgrounds, treasure (RollTable).
 
 PIPELINE (main): Phase 2 journals (migrate_book) → Phase 3 entities
 (migrate_races/classes/items/spells/psionics/monsters) → Phase 4
-(migrate_proficiencies/skills) → Phase 5 (migrate_treasure) → write_module_json.
-Each migrate_* opens a pack via _open_pack (wipe+recreate), parses its .DAT, and
-writes Foundry documents built by the corresponding make_* / factory functions.
+(migrate_proficiencies/skills/backgrounds) → Phase 5 (migrate_treasure)
+→ write_module_json. Each migrate_* opens a pack via _open_pack
+(wipe+recreate), parses its source, and writes Foundry documents built by
+the corresponding make_* factory functions.
 
 ──────────────────────────────────────────────────────────────────────────────
 COPYRIGHT (critical — the AD&D 2e content is TSR/WotC's; the user holds no
@@ -46,9 +44,6 @@ redistribution rights):
     see _SPELL_ICON_INDEX, _SPELL_DESC_HTM_INDEX, _SPELL_REVERSE_INDEX and
     _spell_records(). Generic terms also present in OSRIC (OGL Open Game Content)
     are treated as safe and may appear as literals (e.g. icon-match keywords).
-
-Companion docs at the project root: DAT_FORMAT.md (binary formats), CLAUDE.md
-(HTML format + ARS schema reference), ARS_MECHANICS.md (effect/action recipes).
 """
 
 import os
@@ -83,7 +78,7 @@ OUTPUT_IMG   = "adnd2-compendium/images"
 MODULE_ID    = "adnd2-compendium"
 
 # Phase 3 — DATABASE/*.DAT binary files
-# Schema reference: see DAT_FORMAT.md
+# Binary schema: MFC CArchive format
 # Field mapping reference: see MAPPING.md
 DATABASE_BASE = "cd-rom/DATABASE"
 BITMAPS_BASE  = "cd-rom/BITMAPS"
@@ -151,7 +146,7 @@ FOLDERS = [
 
 CORE_VERSION   = "14.361"
 SYSTEM_ID      = "ars"
-SYSTEM_VERSION = "2026.05.19"
+SYSTEM_VERSION = "2026.05.25"
 
 # ─── ID generation ────────────────────────────────────────────────────────────
 
@@ -283,7 +278,7 @@ def _chapter_title_from_file(filepath):
 def build_chapters(book_dir, book_prefix, toc_entries):
     """Group a book's content files into chapters [{title, files}].
 
-    Two strategies (see CLAUDE.md "Chapter detection"): if the TOC exposes bold
+    Two strategies: if the TOC exposes bold
     SIZE>=4 chapter links (PHB, DMG, TOM, AEG) split on those file boundaries;
     otherwise (the Complete/Option books, whose TOC links are only SIZE=3) scan
     each file for the first chapter-coloured heading (_chapter_title_from_file)
@@ -555,7 +550,7 @@ def merge_chapter_html(book_dir, book_key, chapter, src_dir_files):
 
 def make_page(page_id, title, content, sort):
     """Build a JournalEntryPage document (text page). `text.format: 1` = HTML.
-    Stored under `!journal.pages!{journalId}.{pageId}` (see CLAUDE.md key table)."""
+    Stored under `!journal.pages!{journalId}.{pageId}`."""
     return {
         "name": title, "type": "text",
         "title": {"show": True, "level": 1},
@@ -604,7 +599,7 @@ def make_folder(folder_id, name, parent_id=None, sort=0):
 
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 3 — DATABASE/*.DAT migration
-# See DAT_FORMAT.md for binary schema reference
+# Binary schema: MFC CArchive format, reverse-engineered from the CD-ROM binaries
 # See MAPPING.md for DAT → Foundry field mapping
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -806,10 +801,10 @@ def parse_montype(buf):
     return result
 
 
-# RACE.DAT — see DAT_FORMAT.md §3.1
+# RACE.DAT — MFC CArchive, CRaceOb records
 def parse_race_record(buf, start, end):
     """Parse one CRaceOb record (a race) into a dict of fields read at fixed
-    post-name offsets (DAT_FORMAT.md §3.1): ability score min/max ranges (12
+    post-name offsets: ability score min/max ranges (12
     int32), per-ability adjustments (6 int32), class level caps + demographics
     (18 int32 — caps, starting age, race id, height/weight), then a tail scan
     for portrait .BMP filenames. Returns None if the record is too short/invalid.
@@ -945,7 +940,7 @@ def parse_races():
     return out
 
 
-# CLASS.DAT — see DAT_FORMAT.md §3.2
+# CLASS.DAT — MFC CArchive, CClassOb records
 def parse_class_record(buf, start, end):
     """Parse one CClassOb record (a class). Validates the per-record "TSRP3 V39"
     version Pascal, then reads name, group id (warrior/rogue/priest/wizard/
@@ -953,7 +948,7 @@ def parse_class_record(buf, start, end):
     offsets: the XP-by-level table (monotonic int run) and the THAC0 table. Also
     extracts the per-level saving-throw matrix (`save_table`) located by the
     Normal-Man baseline row [16,18,17,20,19] — that table is later read at
-    level=HD to derive monster saves (DAT_FORMAT.md §3.2). Returns None if the
+    level=HD to derive monster saves. Returns None if the
     version marker or name is missing."""
     p = start
     r = {}
@@ -1009,7 +1004,7 @@ def parse_class_record(buf, start, end):
     # Layout: 1 baseline row (row 0) + 99 level rows, 5 int32 each. Columns:
     #   [paralyze/poison/death, rod/staff/wand, petrify/polymorph, breath, spell]
     # rows[L] = saving throws at class level L (rows[0] = level-0 / Normal Man).
-    # Validated vs PHB 2e for fighter/thief/cleric/mage (DAT_FORMAT.md §3.2).
+    # Validated vs PHB 2e for fighter/thief/cleric/mage.
     sig = struct.pack('<5i', 16, 18, 17, 20, 19)
     sp = buf.find(sig, start, end)
     if sp > 0:
@@ -1046,7 +1041,7 @@ def parse_classes():
     return out
 
 
-# PARTS.DAT — see DAT_FORMAT.md §3.3
+# PARTS.DAT — MFC CArchive, CPart + CPartKitOb records
 # Known class names that appear as embedded references (to filter)
 _PART_CLASS_NAMES = {'Fighter','Paladin','Ranger','Thief','Bard','Cleric','Druid','Mage',
     'Abjurer','Conjurer','Diviner','Enchanter','Illusionist','Invoker','Necromancer','Transmuter',
@@ -1537,7 +1532,7 @@ def _kit_class(name, book, filepath=None):
     return 'General'
 
 
-# TREASURE.DAT — see DAT_FORMAT.md §3.7. CTreasureSingleTableOb records: a table
+# TREASURE.DAT — MFC CArchive, CTreasureSingleTableOb records: a table
 # name followed by a list of CTreasureTableEntry objects. Each entry is framed
 # `<mfc-tag> <uint32 weight> 01 <Pascal target>` — the weight is the d100
 # percentage (validated: the top "DMG 88" table's 18 entry weights sum to 100),
@@ -1545,7 +1540,7 @@ def _kit_class(name, book, filepath=None):
 # name ("Oil of Timelessness"). All values read from the user's DAT at runtime.
 def parse_treasure():
     """Parse TREASURE.DAT into [{name, entries:[(weight, target, flag)]}] — DMG
-    treasure roll tables (see the format note above and DAT_FORMAT.md §3.7).
+    treasure roll tables (see the format note above).
     `flag` is 1 for a sub-table reference, 0 for a leaf result/item; `weight` is
     the d100 percentage. Each table record is split by find_records; entries are
     located by their `<weight uint32> <flag 0|1> <Pascal target>` framing."""
@@ -1585,7 +1580,7 @@ def parse_treasure():
     return tables
 
 
-# SPELLS.DAT — see DAT_FORMAT.md §3.4
+# SPELLS.DAT — MFC CArchive, CSpellsOb records
 _SCHOOL_NAMES = {'Abjuration','Alteration','Conjuration','Divination','Enchantment','Illusion',
     'Invocation','Evocation','Necromancy','Charm','Alchemy','Geometry','Shadow','Song','Wild Magic',
     'Universal','Greater Divination','Lesser Divination','Charm/Enchantment','Conjuration/Summoning',
@@ -1598,7 +1593,7 @@ _SPHERE_NAMES = {'All','Animal','Astral','Chaos','Combat','Creation','Elemental'
 
 
 def parse_spell_record(buf, start, end):
-    """Parse one CSpellsOb record (a spell) — DAT_FORMAT.md §3.4. Reads name,
+    """Parse one CSpellsOb record (a spell). Reads name,
     class type (int32 @+8: 1=wizard else priest), level (@+16), then school/
     sphere/range/components/duration/etc. Records whose name is itself a school
     or sphere label are embedded references, not spells, and return None."""
@@ -1669,9 +1664,9 @@ def parse_spells():
     return out
 
 
-# MONSTER.DAT — see DAT_FORMAT.md §3.5
+# MONSTER.DAT — MFC CArchive, CMonsterOb records
 def parse_monster_record(buf, start, end):
-    """Parse one CMonsterOb record (a monster stat block) — DAT_FORMAT.md §3.5.
+    """Parse one CMonsterOb record (a monster stat block).
     The post-Description-label zone is variable (some records insert a special-
     attacks Pascal), so HD is read at the "Damage" landmark −12 and the int32
     stat block [_, XP, 0, THAC0] is found by signature scan past "Damage". AC/MV
@@ -1801,9 +1796,9 @@ def parse_monsters():
     return out
 
 
-# PSIONIC.DAT — see DAT_FORMAT.md §3.6
+# PSIONIC.DAT — MFC CArchive, CPsionicPowerOb records
 def parse_psionic_record(buf, start, end):
-    """Parse one CPsionicPowerOb record (a psionic power) — DAT_FORMAT.md §3.6.
+    """Parse one CPsionicPowerOb record (a psionic power).
     The fields are stored as short Pascal strings before the long-string (0xFF)
     description marker: [0] power score "N/D", [1] range, [2] area of effect; the
     prerequisite is a short Pascal scanned backwards from the record end."""
@@ -2545,7 +2540,7 @@ def _ability_effect_changes(raw_name):
     """Map an ability label (CP-costed or otherwise — from SP bullets, per
     sub-race table cells, etc.) to a list of ARS v14 effect-change dicts.
     Returns [] for descriptive-only labels (no clean stock mechanic).
-    See ARS_MECHANICS.md for the patterns used here.
+    See the ARS system documentation for effect/action patterns.
 
     Applied automatically by the race writer whenever an ability has no
     explicit `changes` already (so labels like "Racial Ability Modifiers"
@@ -4289,7 +4284,7 @@ def make_class_item(cls, description=''):
     """Build an ARS `class` Item from a parsed CLASS.DAT record. Emits the typed
     `system.ranks[]` advancement table (per-level THAC0/saves/XP/HD/spell-slots,
     built by _build_class_ranks) plus class-level features (matrixTable,
-    lasthitdice, proficiencies). See CLAUDE.md "Class item conventions"."""
+    lasthitdice, proficiencies)."""
     item_id = make_id()
     group   = cls.get('group', 'unknown')
     is_psionic = (group == 'psionicist')
@@ -5606,7 +5601,7 @@ def make_spell_item(spell, desc_override_rel=None):
     """Build an ARS `spell` Item from a parsed SPELLS.DAT record. Spell metadata
     (level/school/sphere/range/components/…) lives at the top of system.{}, and
     `system.type` ("Arcane"/"Divine") is set explicitly (required field — see
-    CLAUDE.md). Adds a cast actionGroup (+ a damage/heal action when a dice
+    Adds a cast actionGroup (+ a damage/heal action when a dice
     formula is sniffed from the prose). `desc_override_rel` forces the
     description from a specific .HTM path for name/title-divergent spells."""
     item_id = make_id()
@@ -5671,7 +5666,7 @@ def make_spell_item(spell, desc_override_rel=None):
 def make_power_item(power, description=''):
     """Build an ARS `power` Item (psionic power) from a parsed PSIONIC.DAT record.
     `description` is either S&P HTML (preferred) or plain DAT text (fallback).
-    See the schema note below and CLAUDE.md."""
+    See the schema note below."""
     item_id = make_id()
     # ARSItemPower schema: range / areaOfEffect / prerequisites (note the
     # trailing 's') / ability / formula etc. live at the TOP of system.{},
@@ -5875,7 +5870,7 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     details.type for cross-actor type-trigger effects; a Natural Weaponry
     actionGroup makes the monster click-to-attack. `embed_index` maps normalized
     monster names to (journal_id, page_id) pairs so biography.value uses @embed
-    instead of the raw HTML when a matching MM journal page exists. See CLAUDE.md."""
+    instead of the raw HTML when a matching MM journal page exists."""
     actor_id = make_id()
     img = img_path or "icons/svg/mystery-man.svg"
     align_text = monster.get('alignment', '')
