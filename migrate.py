@@ -1906,6 +1906,15 @@ _ANCHORED_SPELL_RE = re.compile(
     re.I,
 )
 
+# Complete Handbook (CWH/CFH/CBT/CPRH) spell pages list spells as blue SIZE=3
+# bold text WITHOUT <A NAME> anchors. E.g. CWH00182:
+#   <FONT COLOR="#0000ff" SIZE="3"><B>Blackmantle </B></FONT>
+# We find all such markers and slice between consecutive ones for descriptions.
+_CWH_SPELL_RE = re.compile(
+    r'<FONT[^>]+COLOR="#0000ff"[^>]+SIZE="3"[^>]*>\s*<B>\s*([^<\n]{2,60}?)\s*</B>',
+    re.I,
+)
+
 # S&M / SP compilation pages use <A NAME> followed by a colored heading FONT
 # (no <B> tag). E.g. SM00259: <A NAME="..."></A></FONT><FONT COLOR="#ff0000" SIZE="4">
 # <P></P>Cat's Grace<P></P></FONT>
@@ -1965,13 +1974,24 @@ def html_title_index(book_key, prefix):
             # Also scan for S&M / SP colored-heading anchors (no <B> tag)
             heading_anchors = list(_ANCHORED_HEADING_RE.finditer(raw))
             all_anchors = sorted(anchors + heading_anchors, key=lambda m: m.start())
-            if not all_anchors: continue
             for i, m in enumerate(all_anchors):
                 aname = m.group(2).strip().rstrip(':')
                 if not (3 <= len(aname) <= 60): continue
                 start = m.start()
                 end = all_anchors[i+1].start() if i+1 < len(all_anchors) else len(raw)
                 key = aname.lower()
+                cur = index.get(key)
+                if cur is None or cur[0] < 2:
+                    index[key] = (2, (filepath, start, end))
+            # ── CWH / CFH / CBT / CPRH: blue SIZE=3 bold spell names (no <A NAME>) ──
+            # Run after anchor scanners so per-spell pages still take priority.
+            cwh_markers = list(_CWH_SPELL_RE.finditer(raw))
+            for i, m in enumerate(cwh_markers):
+                sname = m.group(1).strip().rstrip('*').strip()
+                if not (2 <= len(sname) <= 60): continue
+                start = m.start()
+                end = cwh_markers[i+1].start() if i+1 < len(cwh_markers) else len(raw)
+                key = sname.lower()
                 cur = index.get(key)
                 if cur is None or cur[0] < 2:
                     index[key] = (2, (filepath, start, end))
@@ -2219,7 +2239,8 @@ def lookup_html_description(name, books):
 
 
 # Per-entity book search order
-_SPELL_HTML_BOOKS   = [('PHB','PHB'), ('TOM','TOM'), ('SM','SM'), ('SP','SP')]
+_SPELL_HTML_BOOKS   = [('PHB','PHB'), ('TOM','TOM'), ('SM','SM'), ('SP','SP'),
+                       ('CWH','CWH')]
 _MONSTER_HTML_BOOKS = [('MM','MM')]
 _ITEM_HTML_BOOKS    = [('AEG','AEG')]
 _ITEM_DMG_BOOKS     = [('DMG','DMG')]
