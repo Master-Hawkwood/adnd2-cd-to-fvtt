@@ -57,6 +57,7 @@ import string
 import struct
 import subprocess
 from html.parser import HTMLParser
+import datetime
 from typing import Any
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
@@ -7149,7 +7150,7 @@ def _class_ability_icon(name):
     if 'contact'          in low: return 'icons/magic/perception/eye-ringed-green.webp'
     if 'mental'           in low: return 'icons/magic/defensive/shield-barrier-blue.webp'
     if 'defense mode'     in low or 'guarded mind' in low:
-        return 'icons/magic/defensive/shield-barrier-dome-deflect-blue.webp'
+        return 'icons/magic/defensive/barrier-shield-dome-deflect-blue.webp'
     # ── Social / Leadership ────────────────────────────────────────────────────
     if 'leadership'       in low or 'supervisor' in low:
         return 'icons/skills/social/diplomacy-peace-alliance.webp'
@@ -8225,7 +8226,13 @@ def _load_phb_nwp_table():
 # ── SP Table 45 — Nonweapon Proficiency Groups (SP00456.HTM) ─────────────────
 _sp_nwp_table_cache = None
 def _load_sp_nwp_table():
-    """Parse SP00456 → {name_lower: {groups: set, cp_cost, initial, ability, anchor}}."""
+    """Parse SP00456 (Table 45) → {name_lower: {groups: set, cp_cost, initial, ability, anchor}}.
+
+    In SP00456 the group headers (GENERAL, PRIEST, ROGUE, WARRIOR, WIZARD) are embedded
+    as table rows whose first cell contains a red bold font — not as separate elements
+    between tables. We iterate the single table's <tr> rows, detect group-header rows
+    by the red+bold font in their first cell, and assign subsequent skill rows to that
+    group until the next header."""
     global _sp_nwp_table_cache
     if _sp_nwp_table_cache is not None: return _sp_nwp_table_cache
     path = os.path.join(SOURCE_BASE, 'SP', 'SP00456.HTM')
@@ -8233,34 +8240,53 @@ def _load_sp_nwp_table():
     if not os.path.exists(path):
         _sp_nwp_table_cache = out; return out
     soup = BeautifulSoup(open(path, encoding='cp1252').read(), 'html.parser')
-    cur_group = None
-    for node in soup.find_all(['font', 'table']):
-        if node.name == 'font' and str(node.get('color', '')).lower() == '#ff0000':
-            raw = node.get_text(strip=True).rstrip(':').title()
-            if raw in ('General','Priest','Rogue','Warrior','Wizard','Psionicist'):
-                cur_group = raw
-            continue
-        if node.name == 'table' and cur_group:
-            for tr in node.find_all('tr'):
-                cells = [td.get_text(strip=True) for td in tr.find_all('td')]
-                if len(cells) < 4: continue
-                name = cells[0]
-                if name in ('','Proficiency') or 'Cost' in cells[1]: continue
-                try: cp = int(cells[1])
-                except ValueError: continue
-                try: init = int(cells[2])
-                except ValueError: init = 0
-                ability = cells[3]
-                href = None
-                for a in tr.find_all('a', href=True):
-                    raw_href = str(a.get('href', ''))
-                    if raw_href.endswith('.htm') or '#' in raw_href:
-                        href = raw_href.split('#')[0]; break
-                key = name.lower()
-                if key not in out:
-                    out[key] = {'name': name, 'groups': set(), 'cp_cost': cp,
-                                'initial': init, 'ability': ability, 'anchor': href}
-                out[key]['groups'].add(cur_group)
+    # Skills before the first explicit group header belong to General
+    cur_group = 'General'
+    _GROUPS = {'General', 'Priest', 'Rogue', 'Warrior', 'Wizard', 'Psionicist'}
+    for table in soup.find_all('table'):
+        for tr in table.find_all('tr'):
+            cells = tr.find_all('td')
+            if not cells:
+                continue
+            # Detect group-header row: first cell contains a red bold font
+            first_cell = cells[0]
+            red_bold = next(
+                (f for f in first_cell.find_all('font')
+                 if str(f.get('color', '')).lower() == '#ff0000' and f.find('b')),
+                None)
+            if red_bold:
+                raw = red_bold.get_text(strip=True).rstrip(':').title()
+                if raw in _GROUPS:
+                    cur_group = raw
+                continue
+            if not cur_group:
+                continue
+            cell_texts = [c.get_text(strip=True) for c in cells]
+            if len(cell_texts) < 4:
+                continue
+            name = cell_texts[0]
+            if name in ('', 'Proficiency') or 'Cost' in cell_texts[1]:
+                continue
+            try:
+                cp = int(cell_texts[1])
+            except ValueError:
+                continue
+            try:
+                init = int(cell_texts[2])
+            except ValueError:
+                init = 0
+            ability = cell_texts[3]
+            href = None
+            for a in tr.find_all('a', href=True):
+                raw_href = str(a.get('href', ''))
+                if raw_href.endswith('.htm') or '#' in raw_href:
+                    href = raw_href.split('#')[0]
+                    break
+            key = name.lower()
+            if key not in out:
+                out[key] = {'name': name, 'groups': set(), 'cp_cost': cp,
+                            'initial': init, 'ability': ability, 'anchor': href}
+            out[key]['groups'].add(cur_group)
     _sp_nwp_table_cache = out
     return out
 
@@ -9005,7 +9031,7 @@ def migrate_skills():
         fid = make_id()
         folders[('phb', g)] = make_compendium_folder(
             fid, g, 'Item', parent=phb_root['_id'], sort=i*1000)
-    for i, g in enumerate(('General','Priest','Rogue','Warrior','Wizard','Psionicist'), 1):
+    for i, g in enumerate(('General','Priest','Rogue','Warrior','Wizard'), 1):
         fid = make_id()
         folders[('sp', g)] = make_compendium_folder(
             fid, g, 'Item', parent=sp_root['_id'], sort=i*1000)
@@ -9418,7 +9444,7 @@ def write_module_json(stats):
         "id": MODULE_ID, "title": "AD&D 2e Compendium",
         "description": "<p>AD&D 2nd Edition Compendium for Foundry VTT (ARS system, Variant 2). "
                        "Built from the user's local AD&D 2e Core Rules CD-ROM.</p>",
-        "version": SYSTEM_VERSION,
+        "version": datetime.date.today().strftime("%Y.%m.%d"),
         "compatibility": {"minimum": "14", "verified": "14"},
         "authors": [{"name": "Hawkwood", "flags": {}},
                     {"name": "Claude Code", "flags": {}}],
