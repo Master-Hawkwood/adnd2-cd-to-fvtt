@@ -5755,28 +5755,39 @@ def make_spell_item(spell, desc_override_rel=None):
 def make_power_item(power, description=''):
     """Build an ARS `power` Item (psionic power) from a parsed PSIONIC.DAT record.
     `description` is either S&P HTML (preferred) or plain DAT text (fallback).
-    See the schema note below."""
-    item_id = make_id()
-    # ARSItemPower schema: range / areaOfEffect / prerequisites (note the
-    # trailing 's') / ability / formula etc. live at the TOP of system.{},
-    # not under system.attributes. The legacy 'power_score' field maps to
-    # 'abilityMod' (the modifier applied to the d20 roll-under check).
+
+    PSP costs come from the `power_score` field parsed from PSIONIC.DAT/S&P, which
+    follows the format "initial/maintenance" (e.g. "5/2", "7+/3+"). These map to:
+      system.powercost    = initial activation PSP cost
+      system.maintenance  = per-round maintenance PSP cost
+    Combat-mode costs (powerCostAttack / powerCostDefense) are left "0" for
+    regular powers; they apply only to the 5 psionic attack/defense combat modes."""
+    item_id  = make_id()
     disc_idx = power.get('discipline', -1)
-    # Plain-text DAT descriptions use CR/LF; convert to spaces for HTML storage.
+    # Plain-text DAT descriptions: normalise line breaks for HTML storage.
     if description and '<' not in description:
         description = re.sub(r'[\r\n]+', ' ', description).strip()
+    # Split "initial/maintenance" PSP cost string read from the source at runtime.
+    raw_cost   = str(power.get('power_score', '') or '')
+    parts      = raw_cost.split('/')
+    psp_cost   = parts[0].strip() if parts else '0'
+    psp_maint  = parts[1].strip() if len(parts) > 1 else '0'
     return {
         "_id": item_id,
         "name": power['name'],
         "type": "power",
         "img": _power_icon(power['name']),
         "system": {
-            "description":   description,
-            "discipline":    _DISC_NAMES.get(disc_idx, ''),
-            "range":         power.get('range', ''),
-            "areaOfEffect":  power.get('area_of_effect', '') or 'personal',
-            "prerequisites": power.get('prerequisite', '') or 'none',
-            "abilityMod":    str(power.get('power_score', '')) or '0',
+            "description":      description,
+            "discipline":       _DISC_NAMES.get(disc_idx, ''),
+            "range":            power.get('range', ''),
+            "areaOfEffect":     power.get('area_of_effect', '') or 'personal',
+            "prerequisites":    power.get('prerequisite', '') or 'none',
+            "abilityMod":       "0",
+            "powercost":        psp_cost   or '0',
+            "maintenance":      psp_maint  or '0',
+            "powerCostAttack":  '0',
+            "powerCostDefense": '0',
         },
         "effects": [], "flags": {"adnd2": {}},
         "folder": None, "sort": 0, "ownership": {"default": -1}, "_stats": _stats_block(),
