@@ -2130,11 +2130,13 @@ def _normalize_spell_name_for_lookup(name):
         for variant in _typo_variants(base_key):
             _push(variant)
 
-    # Known spelling divergences (DAT spelling → HTM spelling).
+    # Known spelling divergences and reverse-spell aliases (DAT name → HTM key).
     ALIASES = {
         "detect snares & pits":          "detect snares and pits",
         "proofing vs combustion":        "proofing versus combustion",
         "create food & water":           "create food & drink",
+        # Reverse spells whose DAT name differs from the primary's HTM page title
+        "babble":                        "tongues",
     }
     base = keys[0] if keys else n_clean.lower()
     if base in ALIASES:
