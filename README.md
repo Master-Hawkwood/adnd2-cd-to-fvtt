@@ -29,6 +29,12 @@ Running the script produces an `adnd2-compendium/` directory containing **11 Fou
 ## Requirements
 
 - **AD&D Core Rules 2.0 Expansion CD-ROM** — your own personal copy
+
+  > **Important:** you need the **2.0 Expansion** (pictured below), not the original Core Rules CD-ROM.
+  > The Expansion contains the additional rulebooks (Complete Handbooks, Player's Options, etc.) that
+  > this script depends on.
+  >
+  > [![AD&D Core Rules 2.0 Expansion CD-ROM](https://www.tsrarchive.com/add/add-cd2x.jpg)](https://www.tsrarchive.com/add/add-cd2x.jpg)
 - **Python 3.8+**
 - **Node.js** with [fvtt-cli](https://github.com/foundryvtt/foundryvtt-cli) — used to write the Foundry LevelDB packs
 - **Foundry VTT v14** with the **ARS** system installed (Variant 2)
