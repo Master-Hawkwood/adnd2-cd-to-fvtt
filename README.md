@@ -34,7 +34,7 @@ Running the script produces an `adnd2-compendium/` directory containing **11 Fou
   > The Expansion contains the additional rulebooks (Complete Handbooks, Player's Options, etc.) that
   > this script depends on.
   >
-  > [![AD&D Core Rules 2.0 Expansion CD-ROM](https://www.tsrarchive.com/add/add-cd2x.jpg)](https://www.tsrarchive.com/add/add-cd2x.jpg)
+  > <a href="https://www.tsrarchive.com/add/add-cd2x.jpg"><img src="https://www.tsrarchive.com/add/add-cd2x.jpg" alt="AD&amp;D Core Rules 2.0 Expansion CD-ROM" width="50%"></a>
 - **Python 3.8+**
 - **Node.js** with [fvtt-cli](https://github.com/foundryvtt/foundryvtt-cli) — used to write the Foundry LevelDB packs
 - **Foundry VTT v14** with the **ARS** system installed (Variant 2)
