@@ -8,20 +8,20 @@ A standalone Python script that converts a personal copy of the **AD&D Core Rule
 
 ## What it generates
 
-Running the script produces an `adnd2-compendium/` directory containing **11 Foundry VTT compendium packs** (~13 000 documents) built entirely from your CD-ROM:
+Running the script produces an `adnd2-compendium/` directory containing **11 Foundry VTT compendium packs** (~10 000 documents) built entirely from your CD-ROM:
 
 | Pack | Contents |
 |---|---|
 | `adnd2-journals` | 19 journal entries, 999 pages of rulebook text |
-| `adnd2-races` | 53 race items with ability modifiers, movement, and active effects |
-| `adnd2-classes` | 26 class items with full per-level advancement tables |
-| `adnd2-items` | 4 584 equipment items (weapons, armor, potions, magic items, gems) |
-| `adnd2-spells` | 841 arcane and divine spells |
+| `adnd2-races` | 45 race items with ability modifiers, movement, active effects, and CP variants |
+| `adnd2-classes` | 26 class items with per-level advancement, PHB abilities, and CP variants |
+| `adnd2-items` | 4 584 equipment items (weapons, armor, potions, magic items, gems) with AEG/DMG descriptions |
+| `adnd2-spells` | 841 arcane and divine spells with cast actions |
 | `adnd2-powers` | 231 psionic powers with discipline and power score |
 | `adnd2-monsters` | 1 524 NPC actors with full stat blocks, biography, and icons |
 | `adnd2-proficiencies` | 104 weapon proficiency items |
-| `adnd2-skills` | 151 skill items (rogue skills + nonweapon proficiencies) |
-| `adnd2-backgrounds` | 208 character kit items with mandatory bonus proficiency auto-grants |
+| `adnd2-skills` | 156 skill items (rogue skills + PHB and S&P nonweapon proficiencies) |
+| `adnd2-backgrounds` | 208 character kit items with bonus proficiency auto-grants and benefit/hindrance abilities |
 | `adnd2-treasure` | 486 treasure roll tables with 3 480 results |
 
 ---
