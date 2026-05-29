@@ -17,7 +17,7 @@ Running the script produces an `adnd2-compendium/` directory containing **11 Fou
 | `adnd2-classes` | 26 class items with per-level advancement, PHB abilities, and CP variants |
 | `adnd2-items` | 4 584 equipment items (weapons, armor, potions, magic items, gems) with AEG/DMG descriptions |
 | `adnd2-spells` | 931 arcane and divine spells with cast actions |
-| `adnd2-powers` | 231 psionic powers with discipline and power score |
+| `adnd2-powers` | 241 psionic powers with discipline and power score, plus 5 attack modes and 5 defense modes |
 | `adnd2-monsters` | 1 524 NPC actors with full stat blocks, biography, and icons |
 | `adnd2-proficiencies` | 104 weapon proficiency items |
 | `adnd2-skills` | 156 skill items (rogue skills + PHB and S&P nonweapon proficiencies) |

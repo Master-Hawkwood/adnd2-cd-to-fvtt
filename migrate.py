@@ -3970,6 +3970,14 @@ _POWER_ICON_KEYWORDS = [
     ('mindflame',     'icons/skills/wounds/anatomy-organ-brain-pink-red.webp'),
     ('synaptic',      'icons/skills/wounds/anatomy-organ-brain-pink-red.webp'),
     ('psychic',       'icons/magic/symbols/circle-ouroboros.webp'),
+    # Psionic combat modes — attack
+    ('whip',          'icons/magic/lightning/bolt-beam-strike-blue.webp'),
+    ('insinuation',   'icons/magic/control/control-influence-puppet.webp'),
+    ('blast',         'icons/magic/lightning/bolt-forked-large-blue.webp'),
+    # Psionic combat modes — defense
+    ('fortress',      'icons/magic/defensive/barrier-shield-dome-blue-purple.webp'),
+    ('thought',       'icons/magic/defensive/shield-barrier-deflect-teal.webp'),
+    ('tower',         'icons/magic/defensive/armor-shield-barrier-steel.webp'),
     ('mind',          'icons/magic/perception/eye-tendrils-web-purple.webp'),
     # Animal / plant / nature
     ('animal',        'icons/environment/creatures/horse-brown.webp'),
@@ -7123,6 +7131,42 @@ def _build_sp_psionic_index():
     return index
 
 
+# Paths to dedicated SP pages for the 5 psionic attack modes and 5 defense modes.
+# Hard-coded as location references only — names and descriptions read at runtime.
+_SP_ATTACK_MODE_FILES = [
+    'SP/SP00329.HTM',  # Ego Whip (EW)
+    'SP/SP00330.HTM',  # Id Insinuation (II)
+    'SP/SP00331.HTM',  # Mind Thrust (MT)
+    'SP/SP00332.HTM',  # Psionic Blast (PB)
+    'SP/SP00333.HTM',  # Psychic Crush (PsC)
+]
+_SP_DEFENSE_MODE_FILES = [
+    'SP/SP00335.HTM',  # Intellect Fortress (IF)
+    'SP/SP00336.HTM',  # Mental Barrier (MB)
+    'SP/SP00337.HTM',  # Mind Blank (MBk)
+    'SP/SP00338.HTM',  # Thought Shield (TS)
+    'SP/SP00339.HTM',  # Tower of Iron Will (TW)
+]
+
+
+def _parse_sp_combat_mode_page(rel_path, src_dir_files):
+    """Parse one SP psionic attack/defense mode page.  Returns (name, html_desc)
+    where name is read from the <TITLE> (before the first '--') and desc is the
+    cleaned HTML body.  Returns ('', '') on any error."""
+    path = os.path.join(SOURCE_BASE, rel_path)
+    if not os.path.exists(path):
+        return ('', '')
+    try:
+        with open(path, encoding='cp1252') as fh:
+            content = fh.read()
+        raw_title = content.split('<TITLE>')[1].split('</TITLE>')[0].strip()
+        name = raw_title.split('--')[0].strip()
+        html = clean_html_file(path, 'SP', src_dir_files)
+        return (name, html)
+    except Exception:
+        return ('', '')
+
+
 _phb_class_desc_cache = None
 
 
@@ -8207,8 +8251,9 @@ def migrate_spells():
 def migrate_psionics():
     """Phase 3: write the powers pack — a `power` Item per PSIONIC.DAT record,
     foldered by discipline (Clairsentience / Psychokinesis / Psychometabolism /
-    Psychoportation / Telepathy). Description priority: S&P HTML > DAT text > ''.
-    Returns count."""
+    Psychoportation / Telepathy), plus two extra folders for the 5 psionic attack
+    modes and 5 defense modes sourced from dedicated S&P pages.
+    Description priority: S&P HTML > DAT text > ''.  Returns count."""
     print("\n=== Psionic Powers (PSIONIC.DAT) ===")
     powers = parse_psionics()
     if not powers:
@@ -8217,6 +8262,10 @@ def migrate_psionics():
     print(f"  S&P power pages indexed: {len(sp_index)}")
     db = _open_pack(OUTPUT_PACKS['powers'])
 
+    sp_book_dir = os.path.join(SOURCE_BASE, 'SP')
+    sp_dir_files = ({f.upper(): f for f in os.listdir(sp_book_dir)}
+                   if os.path.isdir(sp_book_dir) else {})
+
     # One folder per discipline, in canonical order
     disc_folders = {}
     for sort_i, (disc_idx, disc_name) in enumerate(_DISC_NAMES.items()):
@@ -8224,11 +8273,23 @@ def migrate_psionics():
         disc_folders[disc_idx] = fid
         folder = make_compendium_folder(fid, disc_name, 'Item', sort=sort_i * 1000)
         db.put(f'!folders!{fid}'.encode(), json.dumps(folder).encode())
+    base_sort = len(_DISC_NAMES) * 1000
+    # Attack Modes folder (disc=-2) and Defense Modes folder (disc=-3)
+    atk_fid = make_id()
+    disc_folders[-2] = atk_fid
+    db.put(f'!folders!{atk_fid}'.encode(),
+           json.dumps(make_compendium_folder(atk_fid, 'Attack Modes', 'Item',
+                                             sort=base_sort)).encode())
+    def_fid = make_id()
+    disc_folders[-3] = def_fid
+    db.put(f'!folders!{def_fid}'.encode(),
+           json.dumps(make_compendium_folder(def_fid, 'Defense Modes', 'Item',
+                                             sort=base_sort + 1000)).encode())
     # Fallback folder for powers without a recognised discipline
     other_fid = make_id()
     disc_folders[-1] = other_fid
     other_folder = make_compendium_folder(other_fid, 'Other', 'Item',
-                                          sort=len(_DISC_NAMES) * 1000)
+                                          sort=base_sort + 2000)
     db.put(f'!folders!{other_fid}'.encode(), json.dumps(other_folder).encode())
 
     sp_hits = dat_hits = no_desc = count = 0
@@ -8247,6 +8308,27 @@ def migrate_psionics():
         item['folder'] = disc_folders.get(disc_idx, other_fid)
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
+
+    # Attack modes and defense modes: sourced from dedicated S&P pages.
+    for rel_files, folder_disc in [(_SP_ATTACK_MODE_FILES, -2),
+                                   (_SP_DEFENSE_MODE_FILES, -3)]:
+        for sort_i, rel in enumerate(rel_files):
+            name, html = _parse_sp_combat_mode_page(rel, sp_dir_files)
+            if not name or not html.strip():
+                continue
+            power_dict = {
+                'name': name,
+                'discipline': folder_disc,
+                'power_score': '',
+                'range': '',
+                'area_of_effect': '',
+            }
+            item = make_power_item(power_dict, description=html)
+            item['folder'] = disc_folders[folder_disc]
+            item['sort'] = sort_i * 1000
+            db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+            count += 1
+
     db.close()
     print(f"  → {count} powers in {len(disc_folders)} folders  "
           f"(S&P HTML: {sp_hits}, DAT text: {dat_hits}, none: {no_desc})")
