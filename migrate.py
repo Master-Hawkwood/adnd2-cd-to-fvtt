@@ -7333,14 +7333,20 @@ def _class_abilities_for(cls, class_descs):
     return specs
 
 
+_RANGER_THIEVING_SKILLS = frozenset({'Move Silently', 'Hide in Shadows'})
+
+
 def _class_thieving_skills_for(cls_name):
     """Return the list of thieving skill names to auto-grant for a class.
-    Thief gets all 8; Bard gets the subset defined in _BARD_THIEVING_SKILLS."""
+    Thief gets all 8; Bard gets the 4 in _BARD_THIEVING_SKILLS; Ranger gets
+    Move Silently and Hide in Shadows (Table 18, PHB)."""
     low = cls_name.lower()
     if low == 'thief':
         return list(_THIEVING_SKILL_NAMES)
     if low == 'bard':
         return [s for s in _THIEVING_SKILL_NAMES if s in _BARD_THIEVING_SKILLS]
+    if low == 'ranger':
+        return [s for s in _THIEVING_SKILL_NAMES if s in _RANGER_THIEVING_SKILLS]
     return []
 
 
