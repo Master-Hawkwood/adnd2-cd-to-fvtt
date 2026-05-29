@@ -8292,6 +8292,37 @@ def _load_sp_nwp_table():
 
 
 # ── Description extractor for individual proficiency pages ──────────────────
+def _load_sp_psionicist_nwps():
+    """Scan SP*.HTM for Psionicist-specific NWPs (individual pages with title
+    '{Name}-- Psionicist Nonweapon Proficiency (Skills & Powers)').
+    Returns [{name, description}] in file order."""
+    book_dir = os.path.join(SOURCE_BASE, 'SP')
+    if not os.path.isdir(book_dir):
+        return []
+    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    out = []
+    for fn in sorted(os.listdir(book_dir)):
+        if not (fn.upper().startswith('SP') and fn.upper().endswith('.HTM')):
+            continue
+        path = os.path.join(book_dir, fn)
+        try:
+            with open(path, encoding='cp1252') as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        if '<TITLE>' not in content:
+            continue
+        title = content.split('<TITLE>')[1].split('</TITLE>')[0].strip()
+        if 'Psionicist Nonweapon Proficiency' not in title:
+            continue
+        # Name is everything before the first "--"
+        name = title.split('--')[0].strip()
+        desc = clean_html_file(path, 'SP', src_files)
+        if name and desc.strip():
+            out.append({'name': name, 'description': desc})
+    return out
+
+
 def _extract_proficiency_description(book_key, anchor_file):
     """Read one PHB/SP nonweapon-proficiency page and return cleaned HTML.
     Reuses _clean_html_body, dropping the leading bold label and trailing TOC link."""
@@ -9031,7 +9062,7 @@ def migrate_skills():
         fid = make_id()
         folders[('phb', g)] = make_compendium_folder(
             fid, g, 'Item', parent=phb_root['_id'], sort=i*1000)
-    for i, g in enumerate(('General','Priest','Rogue','Warrior','Wizard'), 1):
+    for i, g in enumerate(('General','Priest','Rogue','Warrior','Wizard','Psionicist'), 1):
         fid = make_id()
         folders[('sp', g)] = make_compendium_folder(
             fid, g, 'Item', parent=sp_root['_id'], sort=i*1000)
@@ -9130,6 +9161,16 @@ def migrate_skills():
                 item['folder'] = folders[('sp', pri)]['_id']; break
         else:
             item['folder'] = folders[('sp','General')]['_id']
+        db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+        counts['sp_nwp'] += 1
+
+    # ── S&P Psionicist-specific nonweapon proficiencies (individual chapter pages) ─
+    psi_icon = 'icons/magic/perception/third-eye-blue-red.webp'
+    for rec in _load_sp_psionicist_nwps():
+        icon = _pick_prof_skill_icon(rec['name'], psi_icon)
+        item = make_nwp_skill_item(rec['name'], 'S&P Psionicist Nonweapon Proficiency',
+                                   0, '', '', rec['description'], icon)
+        item['folder'] = folders[('sp', 'Psionicist')]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         counts['sp_nwp'] += 1
 
