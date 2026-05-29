@@ -9475,7 +9475,8 @@ def write_module_json(stats):
                        "Built from the user's local AD&D 2e Core Rules CD-ROM.</p>",
         "version": SYSTEM_VERSION,
         "compatibility": {"minimum": "14", "verified": "14"},
-        "authors": [{"name": "AD&D 2e Compendium Project", "flags": {}}],
+        "authors": [{"name": "Hawkwood", "flags": {}},
+                    {"name": "Claude Code", "flags": {}}],
         "relationships": {"systems": [{"id": "ars", "type": "system"}]},
         "packs": packs,
     }
