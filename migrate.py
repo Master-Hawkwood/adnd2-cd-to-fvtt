@@ -1979,7 +1979,8 @@ def html_title_index(book_key, prefix):
                 if not (3 <= len(aname) <= 60): continue
                 start = m.start()
                 end = all_anchors[i+1].start() if i+1 < len(all_anchors) else len(raw)
-                key = aname.lower()
+                # Normalize typographic apostrophes so keys match ASCII DAT names.
+                key = aname.lower().replace('’', "'").replace('‘', "'").replace('\x92', "'")
                 cur = index.get(key)
                 if cur is None or cur[0] < 2:
                     index[key] = (2, (filepath, start, end))
@@ -1991,7 +1992,7 @@ def html_title_index(book_key, prefix):
                 if not (2 <= len(sname) <= 60): continue
                 start = m.start()
                 end = cwh_markers[i+1].start() if i+1 < len(cwh_markers) else len(raw)
-                key = sname.lower()
+                key = sname.lower().replace('’', "'").replace('‘', "'").replace('\x92', "'")
                 cur = index.get(key)
                 if cur is None or cur[0] < 2:
                     index[key] = (2, (filepath, start, end))
@@ -2117,6 +2118,11 @@ def _normalize_spell_name_for_lookup(name):
         if kk != k: out.append(kk)
         kk = k.replace('acclerate', 'accelerate')
         if kk != k: out.append(kk)
+        # demi-shadow ↔ demishadow (PHB pages drop the hyphen)
+        kk = k.replace('demi-shadow', 'demishadow')
+        if kk != k: out.append(kk)
+        kk = k.replace('demishadow', 'demi-shadow')
+        if kk != k: out.append(kk)
         # vs ↔ versus
         kk = re.sub(r'\bvs\b\.?', 'versus', k)
         if kk != k: out.append(kk)
@@ -2179,10 +2185,13 @@ def _normalize_spell_name_for_lookup(name):
         "streighten wood":               "warp wood",
         "temporal reinstatement":        "temporal stasis",
         "youthful object":               "age object",
+        "selective passage":             "tanglefoot",
+        "the black circle":              "the great circle",
     }
     base = keys[0] if keys else n_clean.lower()
     if base in ALIASES:
         _push(ALIASES[base])
+        _push(ALIASES[base] + ' spell')  # e.g. "Dream Spell" page for Nightmare alias
 
     # ── Reversible-spell pairs: AD&D 2e PHB merges each reversible pair into a
     # single HTM page titled after the primary. The DAT splits them, so a reverse
@@ -4883,6 +4892,27 @@ _SPELL_DESC_HTM_INDEX = {
     28:  'PHB/PHB00433.HTM',
     327: 'TOM/TOM00067.HTM',
     743: 'TOM/TOM00169.HTM',
+    # Call Phoenix is embedded in the Phoenix monster page (MM) — anchor to spell section.
+    918: ('MM/MM00240.HTM', 'Call Phoenix'),
+    # HTM title is "Chariot Sustarre" (missing "of") — bypass name lookup.
+    528: 'PHB/PHB00871.HTM',
+    # HTM title has no space after comma: "Control Temperature,10' Radius" vs DAT "10-foot".
+    646: 'PHB/PHB00802.HTM',
+    # Create/Destroy Crypt Thing (wizard + priest) — embedded in the Crypt Thing monster page.
+    453: ('MM/MM00043.HTM', 'Create Crypt Thing'),
+    454: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
+    914: ('MM/MM00043.HTM', 'Create Crypt Thing'),
+    915: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
+    # HTM title "Dimension Blade" (missing "al") — bypass name lookup.
+    416: 'SM/SM00285.HTM',
+    # DAT typo "Enegry Drain" — PHB page title is correct "Energy Drain".
+    910: 'PHB/PHB00700.HTM',
+    # HTM title "Persistance" (missing 'e') — bypass name lookup.
+    423: 'SM/SM00292.HTM',
+    # SM00336 has an empty <TITLE> — bypass name lookup.
+    854: 'SM/SM00336.HTM',
+    # DAT "Summon" maps to "Summon Animal Spirit" page (title singular vs DAT generic name).
+    912: 'SM/SM00326.HTM',
 }
 
 _spell_records_cache = None
@@ -4913,13 +4943,38 @@ def _spell_icon_for_name(name):
 
 def _spell_description_from_path(rel):
     """Read + clean a spell description directly from a hard-coded source .HTM
-    path (a location reference; the text is read at runtime)."""
+    path (a location reference; the text is read at runtime).
+
+    `rel` may be a tuple (path, anchor_text) when the spell is embedded inside
+    a larger page (e.g. a monster page).  In that case only the HTML starting
+    from the first occurrence of `anchor_text` (case-insensitive) is cleaned.
+    """
+    anchor = None
+    if isinstance(rel, tuple):
+        rel, anchor = rel
     path = os.path.join(SOURCE_BASE, rel)
     if not os.path.exists(path):
         return ''
     try:
+        book_key = rel.split('/')[0]
         src_dir_files = {f.upper(): f for f in os.listdir(os.path.dirname(path))}
-        return clean_html_file(path, rel.split('/')[0], src_dir_files)
+        if anchor is None:
+            return clean_html_file(path, book_key, src_dir_files)
+        # Anchor mode: extract the HTML slice starting at anchor_text.
+        with open(path, 'r', encoding='cp1252') as fh:
+            raw = fh.read()
+        lo = raw.lower().find(anchor.lower())
+        if lo < 0:
+            return clean_html_file(path, book_key, src_dir_files)
+        # Back up to the nearest tag boundary so we don't start mid-tag.
+        tag_start = raw.rfind('<', 0, lo)
+        if tag_start < 0:
+            tag_start = lo
+        snippet = raw[tag_start:]
+        wrapped = f'<HTML><BODY>{snippet}</BODY></HTML>'
+        soup = BeautifulSoup(wrapped, 'html.parser')
+        body = soup.find('body') or soup
+        return _clean_html_body(body, soup, book_key, src_dir_files)
     except Exception:
         return ''
 
