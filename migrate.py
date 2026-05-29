@@ -1895,9 +1895,13 @@ _PER_SPELL_TITLE_RE = re.compile(
 # "Nth-Level Spells -- Wizard" page in PHB), with format:
 #   <A NAME="hex_id"></A><B>Spell Name</B>
 # Some pages wrap the <B> tag in a <FONT>; the regex tolerates that.
+# Also tolerates an optional </FONT> between the anchor and the spell FONT:
+# PHB compilation pages close the previous section's FONT before the spell FONT,
+# so the first spell in each level group has </FONT><FONT ...><B>Name</B>.
 _ANCHORED_SPELL_RE = re.compile(
     r'<A\s+NAME="([^"]+)"\s*></A>'   # the anchor
-    r'(?:\s*<FONT[^>]*>)?'           # optional FONT wrapper
+    r'(?:\s*</FONT>)?'               # optional closing FONT (first-in-series pages)
+    r'(?:\s*<FONT[^>]*>)?'           # optional opening FONT wrapper
     r'\s*<B>\s*([^<]+?)\s*</B>',     # the spell name
     re.I,
 )
