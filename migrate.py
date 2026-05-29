@@ -53,6 +53,7 @@ Companion docs at the project root: DAT_FORMAT.md (binary formats), CLAUDE.md
 
 import os
 import re
+import sys
 import html
 import json
 import shutil
@@ -61,7 +62,9 @@ import string
 import struct
 import subprocess
 from html.parser import HTMLParser
-from bs4 import BeautifulSoup, NavigableString, Tag
+from typing import Any
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString, Tag
 from PIL import Image
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -179,7 +182,7 @@ class TitleParser(HTMLParser):
         super().__init__()
         self._in = False
         self.title = ''
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag, attrs):  # noqa: attrs required by HTMLParser interface
         if tag == 'title': self._in = True
     def handle_endtag(self, tag):
         if tag == 'title': self._in = False
@@ -261,8 +264,8 @@ def _chapter_title_from_file(filepath):
         raw = f.read()
     soup = BeautifulSoup(raw, 'html.parser')
     for font in soup.find_all('font'):
-        color = (font.get('color') or '').lower()
-        try:    size = int(font.get('size') or 0)
+        color = str(font.get('color') or '').lower()
+        try:    size = int(str(font.get('size') or 0))
         except (TypeError, ValueError): size = 0
         is_bold = bool(font.find('b')) or (
             font.parent and getattr(font.parent, 'name', None) == 'b')
@@ -334,7 +337,7 @@ def build_chapters(book_dir, book_prefix, toc_entries):
 BLOCK_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'pre', 'ul', 'ol', 'blockquote'}
 
 
-def merge_consecutive_headings(body, soup):
+def merge_consecutive_headings(body):
     """
     Merge consecutive sibling headings of the same level into one.
     e.g. <h2>Chapter 1:</h2><h2>Title</h2> → <h2>Chapter 1: Title</h2>
@@ -349,7 +352,7 @@ def merge_consecutive_headings(body, soup):
                 nxt = h.next_sibling
                 while nxt and isinstance(nxt, NavigableString) and not nxt.strip():
                     nxt = nxt.next_sibling
-                if nxt and getattr(nxt, 'name', None) == level:
+                if nxt and isinstance(nxt, Tag) and nxt.name == level:
                     # Merge: append content of nxt into h
                     h.append(NavigableString(' '))
                     for child in list(nxt.children):
@@ -456,14 +459,13 @@ def process_fonts(body, soup, src_dir_files, book_key):
     # Convert FONT tags to semantic equivalents
     # Process bottom-up to handle nesting correctly
     for font in body.find_all('font'):
-        color    = (font.get('color') or '').lower()
-        try:    size = int(font.get('size') or 3)
+        color    = str(font.get('color') or '').lower()
+        try:    size = int(str(font.get('size') or 3))
         except (TypeError, ValueError): size = 3
 
         is_bold = bool(font.find('b')) or (font.parent and getattr(font.parent, 'name', None) == 'b')
 
         red    = color in ('#ff0000', 'red')
-        green  = color in ('#008000', 'green')
         blue   = color in ('#0000ff', 'blue')
         purple = color in ('#800080', 'purple')
         navy   = color == '#000080'
@@ -512,7 +514,7 @@ def _clean_html_body(body, soup, book_key, src_dir_files):
     file) and the sub-race-section extractor."""
     process_fonts(body, soup, src_dir_files, book_key)
     clean_heading_content(body)
-    merge_consecutive_headings(body, soup)
+    merge_consecutive_headings(body)
     restructure_paragraphs(body, soup)
     for h in body.find_all(['h1', 'h2', 'h3', 'h4']):
         text = h.get_text()
@@ -642,7 +644,8 @@ def read_mfc_long_pascal(buf, off):
 def parse_mfc_header(buf):
     """Read CArchive class header. Returns (count, schema, class_name, header_end)."""
     count  = struct.unpack_from('<H', buf, 0)[0]
-    _tag   = struct.unpack_from('<H', buf, 2)[0]   # expect 0xFFFF
+    # buf[2:4] is the class tag (expected 0xFFFF), skip it
+    struct.unpack_from('<H', buf, 2)
     schema = struct.unpack_from('<H', buf, 4)[0]
     nlen   = struct.unpack_from('<H', buf, 6)[0]
     name   = buf[8:8+nlen].decode('ascii')
@@ -792,8 +795,8 @@ def parse_montype(buf):
     for off in markers:
         name, p = read_pascal(buf, off)
         if not name: continue
-        # Skip the sheet Pascal
-        _sheet, p = read_pascal(buf, p)
+        # Skip the sheet Pascal (value unused)
+        _, p = read_pascal(buf, p)
         # Skip 10 bytes of structured data
         p += 10
         # Individual Pascal
@@ -964,6 +967,12 @@ def parse_class_record(buf, start, end):
     gid = r['group_id']
     r['group'] = (['warrior', 'rogue', 'priest', 'wizard', 'psionicist'][gid]
                   if 0 <= gid <= 4 else 'unknown')
+    # Proficiency fields live in the 33-int32 header zone between sub_class_id and
+    # the XP table. Offsets validated against all 26 classes (see class_probe3.txt):
+    #   [23] = NWP starting slots   [24] = NWP gain rate (every N levels)
+    #   [27] = WP starting slots    [28] = WP gain rate  (every N levels)
+    #   [29] = non-proficiency attack penalty (negative)
+    _rel = p - start + 8   # relative offset of first proficiency int32 zone from start
     # Find XP table — sequence of monotonic ints starting with L2 XP
     # Locate by scanning for plausible start (small int < 5000)
     chunk = buf[start:start+1024]
@@ -977,6 +986,13 @@ def parse_class_record(buf, start, end):
             xp_offset = off
             break
     if xp_offset is not None:
+        # Proficiency fields at fixed int32 indices from p_data (see _rel above)
+        if _rel + 29*4 + 4 <= xp_offset:
+            r['nwp_starting']  = struct.unpack_from('<i', chunk, _rel + 23*4)[0]
+            r['nwp_gain_level']= struct.unpack_from('<i', chunk, _rel + 24*4)[0]
+            r['wp_starting']   = struct.unpack_from('<i', chunk, _rel + 27*4)[0]
+            r['wp_gain_level'] = struct.unpack_from('<i', chunk, _rel + 28*4)[0]
+            r['wp_penalty']    = struct.unpack_from('<i', chunk, _rel + 29*4)[0]
         # HD die/count/HP-after live ~72 bytes before XP table (validated for Fighter, Mage, etc.)
         if xp_offset >= 72:
             r['hit_die']         = struct.unpack_from('<i', chunk, xp_offset - 72)[0]
@@ -1800,18 +1816,26 @@ def parse_psionic_record(buf, start, end):
         r['discipline'] = struct.unpack_from('<I', buf, p + 4)[0]
     # Walk SHORT Pascal fields, stopping at the first MFC long string (0xFF marker)
     short_pascals = []
+    desc_start = None
     while p < end - 1:
         n = buf[p]
         # Stop if we hit a long-string marker (the description follows)
         if n == 0xFF and p + 3 < end:
+            desc_start = p
             break
-        if 2 <= n <= 80 and p+1+n <= end:
+        if 2 <= n <= 254 and p+1+n <= end:
             seq = buf[p+1:p+1+n]
-            if all(32 <= b < 127 for b in seq):
+            # Allow CR/LF/TAB inside description text alongside printable ASCII
+            if all(b in (9, 10, 13) or (32 <= b < 127) for b in seq):
                 short_pascals.append(seq.decode('latin-1'))
                 p += 1 + n
                 continue
         p += 1
+    # Read the long description pascal that follows the 0xFF marker (> 254 chars)
+    if desc_start is not None:
+        desc, _ = read_mfc_long_pascal(buf, desc_start)
+        if desc and len(desc) > 5:
+            r['description'] = desc.strip()
     # Field assignment based on observed structure:
     # [0] = power score "N/D" or "N+/D+"
     # [1] = range (e.g. "50 yards", "Unlimited", "Personal")
@@ -1820,8 +1844,17 @@ def parse_psionic_record(buf, start, end):
         s0 = short_pascals[0]
         if re.match(r'^\d+\+?\s*/\s*\d+\+?', s0):
             r['power_score'] = s0
-    if len(short_pascals) >= 2: r['range']          = short_pascals[1]
-    if len(short_pascals) >= 3: r['area_of_effect'] = short_pascals[2]
+    if len(short_pascals) >= 2: r['range'] = short_pascals[1]
+    # Fields [2]+ may be aoe and/or a short description (< 80 chars). Distinguish
+    # by length: descriptions are typically >= 40 chars; aoe names are shorter.
+    # Long pascal descriptions (> 80 chars) are handled separately above.
+    for s in short_pascals[2:]:
+        if len(s) >= 40:
+            if 'description' not in r:
+                r['description'] = s
+        else:
+            if 'area_of_effect' not in r:
+                r['area_of_effect'] = s
     # Try to find prerequisite as a SHORT Pascal AFTER the long description (near record end)
     # Scan backwards from end for a Pascal of length 4-30 that's not text-fragment-like
     for k in range(end - 1, max(start, end - 60), -1):
@@ -2129,10 +2162,7 @@ _SP_ABILITY_LEGEND_FILES   = ['SP/SP00033.HTM',  # "Abilities and Restrictions -
 _SP_EXOTIC_TABLE_FILE      = 'SP/SP00059.HTM'    # codes legend lookup for exotic-race abilities
 _SP_THIEF_SKILLS_FILE      = 'SP/SP00074.HTM'    # column-header source for thief skill names
 _SP_THIEF_BASE_FILE        = 'SP/SP00073.HTM'    # base scores per thief skill
-_DMG_HEAR_NOISE_FILE       = 'DMG/DMG00472.HTM'  # Table 83 — Chance to Hear Noise by Race
-_DMG_LISTENING_FILE        = 'DMG/DMG00471.HTM'  # Listening (chapter prose)
 _PHB_CLIMBING_RATES_FILE   = 'PHB/PHB00378.HTM'  # Table 65 — Base Climbing Success Rates
-_PHB_CLIMBING_CHAPTER_FILE = 'PHB/PHB00375.HTM'  # Climbing (chapter prose)
 
 # Lineage → SP demihuman page containing detection sub-skill thresholds.
 # (Half-elf / Half-ogre / Human SP pages have no parseable thresholds.)
@@ -2351,43 +2381,11 @@ _sp_exotic_cache   = None
 _sp_subrace_cache  = {}     # {sp_file_path: {subrace_heading: [ability_cells]}}
 _ability_desc_cache = None  # {normalized_label: html} merged across SP files
 _thief_skill_names_cache = None    # ordered list of 13 skill names from SP00074
-_dmg_hear_noise_cache    = None    # {race_lower: percent_int}
 _sp_thief_base_cache     = None    # {skill_lower: percent_int}
 _phb_unskilled_climb_cache = None  # percent_int
 _lineage_detection_cache = {}      # {lineage: [(sub_skill, max_succ, die_size), ...]}
 
 
-def _load_dmg_hear_noise_table():
-    """Parse DMG Table 83 (Chance to Hear Noise by Race). The table is laid
-    out in row-major order as alternating bands of race-name cells and
-    percent-value cells (e.g. 3 names, then 3 values; the second band has
-    its own 3 names + 3 values, separated by blank cells). We walk every
-    cell in document order, sort label-vs-value by content (label = words,
-    value = starts with N%), then pair adjacent groups in 1:1 order.
-    Returns {race_lower: percent_int}."""
-    global _dmg_hear_noise_cache
-    if _dmg_hear_noise_cache is not None:
-        return _dmg_hear_noise_cache
-    out = {}
-    path = os.path.join(SOURCE_BASE, _DMG_HEAR_NOISE_FILE)
-    if os.path.exists(path):
-        with open(path, 'r', encoding='cp1252') as f:
-            soup = BeautifulSoup(f.read(), 'html.parser')
-        labels, percents = [], []
-        for table in soup.find_all('table'):
-            for tr in table.find_all('tr'):
-                for td in tr.find_all(['td','th']):
-                    txt = td.get_text(' ', strip=True)
-                    if not txt: continue
-                    pm = re.match(r'^\s*(\d+)\s*%', txt)
-                    if pm:
-                        percents.append(int(pm.group(1)))
-                    elif re.match(r'^[A-Za-z][A-Za-z\- ]+$', txt):
-                        labels.append(txt)
-        for lab, pct in zip(labels, percents):
-            out[lab.lower()] = pct
-    _dmg_hear_noise_cache = out
-    return out
 
 
 def _load_sp_thief_base_scores():
@@ -2743,7 +2741,7 @@ def _parse_sp_lineage_abilities_section(sp_rel):
     body = soup.find('body') or soup
     purple = [ft for ft in body.find_all('font')
               if ft.get('size') == '4'
-              and (ft.get('color') or '').lower() == '#800080']
+              and str(ft.get('color') or '').lower() == '#800080']
     section_start = next((ft for ft in purple
                           if 'abilities' in ft.get_text(strip=True).lower()),
                          None)
@@ -2759,9 +2757,9 @@ def _parse_sp_lineage_abilities_section(sp_rel):
             if text:
                 out.append((current_label, f'<p>{text}</p>'))
     for elem in section_start.next_elements:
-        if isinstance(elem, NavigableString): continue
+        if not isinstance(elem, Tag): continue
         if elem.name == 'font' and elem.get('size') == '3' \
-                and (elem.get('color') or '').lower() == '#ff0000' \
+                and str(elem.get('color') or '').lower() == '#ff0000' \
                 and elem.find('b'):
             txt = elem.get_text(' ', strip=True)
             if txt.endswith(':'):
@@ -2770,7 +2768,7 @@ def _parse_sp_lineage_abilities_section(sp_rel):
                 current_chunks = []
                 continue
         if elem.name == 'font' and elem.get('size') == '3' \
-                and (elem.get('color') or '').lower() != '#ff0000':
+                and str(elem.get('color') or '').lower() != '#ff0000':
             t = elem.get_text(' ', strip=True)
             if t: current_chunks.append(t)
     _flush()
@@ -2896,7 +2894,7 @@ def _load_sp_exotic_table():
             for row in table.find_all('tr'):
                 cells = [td.get_text(' ', strip=True) for td in row.find_all('td')]
                 if len(cells) < 6: continue
-                race, ac, hp, mv, attacks, chars = cells[:6]
+                race, ac, hp, mv, _, chars = cells[:6]
                 if race.lower() == 'race': continue
                 if not race and prev_race and chars:
                     # Continuation row — append codes to previous race
@@ -2968,7 +2966,7 @@ def _load_sp_subrace_abilities(sp_file_rel):
                 el = el.parent
                 if el is None: break
                 continue
-            text = getattr(prev, 'get_text', lambda *a, **k: str(prev))(' ', strip=True)
+            text = getattr(prev, 'get_text', lambda *a, **kw: str(prev))(' ', strip=True)
             if text:
                 bits.insert(0, text)
                 if sum(len(b) for b in bits) > 800: break
@@ -3068,7 +3066,7 @@ def _phb_extract_combat_bonuses(phb_text):
     Both magnitude and the creature list are read from the CD-ROM text at
     runtime — nothing about the bonus is hardcoded. Returns None members when a
     pattern isn't present (so races without these bonuses yield nothing)."""
-    out = {'offensive': None, 'defensive': None}
+    out: dict[str, Any] = {'offensive': None, 'defensive': None}
     if not phb_text:
         return out
     # Offensive: "...add 1 to their [dice|attack] rolls to hit orcs, ... hobgoblins."
@@ -3917,6 +3915,8 @@ def _kit_description_html(text):
     for j, pos in enumerate(idx):
         chunk = text[pos:bounds[j+1]]
         m = pat.match(chunk)
+        if not m:
+            continue
         label = m.group(0).rstrip(':').strip()
         rest = html.escape(chunk[m.end():].strip())
         out.append(f'<p><strong>{html.escape(label)}:</strong> {rest}</p>')
@@ -4108,11 +4108,11 @@ def _sp_extract_subrace_html(race_name):
     # in document order, as direct children of <body>.
     boundaries = []
     for child in body.children:
-        if getattr(child, 'name', None) != 'font':
+        if not isinstance(child, Tag) or child.name != 'font':
             continue
         if child.get('size') != '4':
             continue
-        col = (child.get('color') or '').lower()
+        col = str(child.get('color') or '').lower()
         if col not in ('#ff0000', '#800080'):
             continue
         boundaries.append(child)
@@ -4120,7 +4120,7 @@ def _sp_extract_subrace_html(race_name):
     # Find the sub-race heading whose text starts with our prefix
     target_idx = -1
     for i, ft in enumerate(boundaries):
-        col = (ft.get('color') or '').lower()
+        col = str(ft.get('color') or '').lower()
         if col != '#ff0000': continue
         text = ft.get_text(' ', strip=True).lower()
         if text.startswith(search_prefix + ' ') or text == search_prefix:
@@ -4148,6 +4148,7 @@ def _sp_extract_subrace_html(race_name):
     # same cleanup pipeline as a full file.
     new_soup = BeautifulSoup('<html><body></body></html>', 'html.parser')
     new_body = new_soup.body
+    assert new_body is not None
     for c in selected:
         # BeautifulSoup Tag/NavigableString support copy via __copy__
         new_body.append(c.__copy__() if hasattr(c, '__copy__') else NavigableString(str(c)))
@@ -4284,7 +4285,7 @@ def _class_icon(name):
     return 'icons/svg/book.svg'
 
 
-def make_class_item(cls):
+def make_class_item(cls, description=''):
     """Build an ARS `class` Item from a parsed CLASS.DAT record. Emits the typed
     `system.ranks[]` advancement table (per-level THAC0/saves/XP/HD/spell-slots,
     built by _build_class_ranks) plus class-level features (matrixTable,
@@ -4301,7 +4302,7 @@ def make_class_item(cls):
         "type": "class",
         "img": _class_icon(cls['name']),
         "system": {
-            "description": "",
+            "description": description,
             "active":      True,
             "xp":          0,
             "xpbonus":     0,
@@ -4315,10 +4316,11 @@ def make_class_item(cls):
                 "wisSpellBonusDisabled": False,
             },
             "proficiencies": {
-                # No starting/earnLevel data in CLASS.DAT; emit schema defaults.
-                "penalty":  0,
-                "weapon":   {"starting": 0, "earnLevel": 0},
-                "skill":    {"starting": 0, "earnLevel": 0},
+                "penalty":  cls.get('wp_penalty',    0),
+                "weapon":   {"starting":  cls.get('wp_starting',    0),
+                             "earnLevel": cls.get('wp_gain_level',  0)},
+                "skill":    {"starting":  cls.get('nwp_starting',   0),
+                             "earnLevel": cls.get('nwp_gain_level', 0)},
             },
             "matrixTable": _CLASS_MATRIX_TABLE.get(group, ''),
             "isPsionic":   is_psionic,
@@ -4338,10 +4340,6 @@ def make_class_item(cls):
 
 
 _SIZE_NORMALIZE = {'T':'tiny','S':'small','M':'medium','L':'large','H':'huge','G':'gargantuan'}
-_DAMAGE_TYPE_LABELS = {
-    'B': 'bludgeoning', 'P': 'piercing', 'S': 'slashing',
-    'B/P': 'bludgeoning_or_piercing', 'P/S': 'piercing_or_slashing', 'B/S': 'bludgeoning_or_slashing',
-}
 
 
 def _ars_damage_type(dt):
@@ -5573,7 +5571,7 @@ def _spell_effect_action_type(name):
     return 'damage'
 
 
-def _make_spell_action_groups(name, save_type, damage_formula, spell_type,
+def _make_spell_action_groups(name, save_type, damage_formula,
                               targeting='single'):
     """Build the actionGroup(s) for a spell item. Minimum: one 'cast'
     action posting a chat card (with the spell's save type so the GM gets
@@ -5655,7 +5653,7 @@ def make_spell_item(spell, desc_override_rel=None):
             "save":         spell.get('saving_throw', ''),
             "learned":      False,
             "actionGroups": _make_spell_action_groups(
-                                spell['name'], save_type, dmg, spell_type,
+                                spell['name'], save_type, dmg,
                                 targeting=targeting),
             # itemList stays empty here; migrate_spells fills it in a
             # post-pass when the spell is the primary of a true reversible
@@ -5670,8 +5668,9 @@ def make_spell_item(spell, desc_override_rel=None):
     }
 
 
-def make_power_item(power):
+def make_power_item(power, description=''):
     """Build an ARS `power` Item (psionic power) from a parsed PSIONIC.DAT record.
+    `description` is either S&P HTML (preferred) or plain DAT text (fallback).
     See the schema note below and CLAUDE.md."""
     item_id = make_id()
     # ARSItemPower schema: range / areaOfEffect / prerequisites (note the
@@ -5679,13 +5678,16 @@ def make_power_item(power):
     # not under system.attributes. The legacy 'power_score' field maps to
     # 'abilityMod' (the modifier applied to the d20 roll-under check).
     disc_idx = power.get('discipline', -1)
+    # Plain-text DAT descriptions use CR/LF; convert to spaces for HTML storage.
+    if description and '<' not in description:
+        description = re.sub(r'[\r\n]+', ' ', description).strip()
     return {
         "_id": item_id,
         "name": power['name'],
         "type": "power",
         "img": _power_icon(power['name']),
         "system": {
-            "description":   "",
+            "description":   description,
             "discipline":    _DISC_NAMES.get(disc_idx, ''),
             "range":         power.get('range', ''),
             "areaOfEffect":  power.get('area_of_effect', '') or 'personal',
@@ -5808,7 +5810,7 @@ def _natural_attack_formulas(damage_str):
     is an attack roll only — we never fabricate a damage value."""
     if not damage_str:
         return []
-    main = re.split(r'\bor\b', damage_str, 1)[0]
+    main = re.split(r'\bor\b', damage_str, maxsplit=1)[0]
     out = []
     for comp in main.split('/'):
         core = re.sub(r'\s*\(.*$', '', comp).strip()
@@ -5863,14 +5865,17 @@ def _monster_saves(save_table, hit_dice):
     return out
 
 
-def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=None):
+def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=None,
+                       embed_index=None):
     """Build an ARS `npc` Actor from a parsed MONSTER.DAT record. AC/THAC0/HD/XP
     come from the DAT; the MM stat-block table (parsed from the matched .HTM
     biography by _parse_mm_statblock) fills #attacks/morale/damage/special
     atk-def/size; saves are derived from the CLASS.DAT fighter table at level=HD
     (`fighter_saves`); `categories` are broad taxonomy tags appended to
     details.type for cross-actor type-trigger effects; a Natural Weaponry
-    actionGroup makes the monster click-to-attack. See CLAUDE.md "NPC schema"."""
+    actionGroup makes the monster click-to-attack. `embed_index` maps normalized
+    monster names to (journal_id, page_id) pairs so biography.value uses @embed
+    instead of the raw HTML when a matching MM journal page exists. See CLAUDE.md."""
     actor_id = make_id()
     img = img_path or "icons/svg/mystery-man.svg"
     align_text = monster.get('alignment', '')
@@ -5898,6 +5903,22 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     # source for the 2e monster-block fields (#attacks, morale, damage, special
     # attacks/defenses, …) — far cleaner than the DAT "tail strings" heuristic.
     sb = _parse_mm_statblock(biography)
+    # Resolve biography display value: prefer an @embed reference to the MM
+    # journal page (already migrated in Phase 2) so the NPC sheet shows the
+    # formatted rulebook page. Fall back to the raw HTML when no matching page
+    # is found (e.g. monsters only in supplemental books, not MM proper).
+    bio_display = biography   # default: raw HTML
+    if embed_index and biography:
+        for cand in candidates:
+            norm = cand.strip().lower()
+            entry = embed_index.get(norm)
+            if entry:
+                jid, pid = entry
+                bio_display = (
+                    f'<p>@embed[Compendium.{MODULE_ID}.adnd2-journals'
+                    f'.JournalEntry.{jid}.JournalEntryPage.{pid}]{{ }}</p>'
+                )
+                break
     # Damage string: labeled MM stat-block value, with the DAT value as the
     # fallback for multi-column blocks where the stat-block cell is truncated.
     # Reused for system.damage and the Natural Weaponry action group.
@@ -5905,9 +5926,9 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     # Build attributes from MONSTER.DAT-extracted fields. Each numeric value
     # is only set when MONSTER.DAT actually yielded one; no hand-typed defaults
     # (AC 10, THAC0 20, MV 12, HD 1, etc.) are substituted.
-    attributes = {
-        "hp":     {"value": 0, "min": 0, "max": 0, "temp": 0, "tempmax": 0, "base": 0},
-        "init":   {"value": 0, "modifier": 0},
+    attributes: dict[str, Any] = {
+        "hp":   {"value": 0, "min": 0, "max": 0, "temp": 0, "tempmax": 0, "base": 0},
+        "init": {"value": 0, "modifier": 0},
     }
     if monster.get('ac') is not None:        attributes["ac"]     = {"value": monster['ac']}
     if monster.get('thaco') is not None:     attributes["thaco"]  = {"value": monster['thaco']}
@@ -5940,7 +5961,7 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
             seen_types.add(cl)
 
     details = {
-        "biography": {"value": biography, "public": ""},
+        "biography": {"value": bio_display, "public": ""},
         "type":      ", ".join(type_tokens),
         "source":    "Monstrous Manual",
         "alignment": align_code,
@@ -6126,7 +6147,11 @@ def _finalize_with_fvtt_cli():
 
         # --out = parent dir; fvtt-cli writes to parent/pack_name/
         cmd    = [_FVTT_CLI_CMD, 'package', 'pack', '-n', pack_name, '--in', src, '--out', packs_dir]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # On Windows npm-global commands are .cmd files and require shell=True to be
+        # found by CreateProcess. encoding= avoids cp1252 decoding errors on non-ASCII output.
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                shell=(sys.platform == 'win32'),
+                                encoding='utf-8', errors='replace')
         n      = len([f for f in os.listdir(src) if f.endswith('.json')])
         if result.returncode == 0:
             print(f"  ✓ {pack_name} ({n} docs)")
@@ -6238,7 +6263,6 @@ def _race_folder_bucket(race_name):
     """Group a race into one of the sub-folders: 'Standard Races', 'Dwarven Subraces',
     'Elven Subraces', 'Gnomish Subraces', 'Halfling Subraces', 'Humanoid Races'."""
     base = _resolve_base_race(race_name) or ''
-    low  = race_name.lower()
     DEMI_BASES = {'Dwarf','Elf','Gnome','Halfling','Half-elf','Half-orc','Half-ogre','Human'}
     if race_name in DEMI_BASES:
         return 'Standard Races'
@@ -6472,7 +6496,7 @@ def migrate_races():
     for race in races:
         abs_ = _race_abilities_for(race)
         race_abilities.append((race, abs_))
-        for (lab, _icon, _chg) in abs_:
+        for (lab, _, __) in abs_:
             label_count[lab] = label_count.get(lab, 0) + 1
 
     # ── 3. Second pass: mint shared ability docs once, per-race specifics inline ──
@@ -6721,17 +6745,782 @@ def migrate_races():
         print(f"  ({no_desc} races without HTML description)")
     return n_races
 
+# ─── S&P psionic-power and Psionicist-class HTML index ────────────────────────
+# SP individual power pages follow the title pattern:
+#   "{Name}-- {Discipline} Power (Skills & Powers)"
+# The Psionicist class page is:
+#   "Psionicist-- Character Class (Skills & Powers)"
+# We extract the name before the first " --" and use it as the lookup key.
+
+_sp_psionic_cache = None
+
+
+def _build_sp_psionic_index():
+    """Build {name_lower → clean_html} for S&P psionic power + Psionicist class pages.
+    Scans all SP*.HTM files; selects those whose <TITLE> ends with 'Power (Skills &
+    Powers)' or 'Character Class (Skills & Powers)'. Returns '' values for empty pages."""
+    global _sp_psionic_cache
+    if _sp_psionic_cache is not None:
+        return _sp_psionic_cache
+    book_dir = os.path.join(SOURCE_BASE, 'SP')
+    index = {}
+    if not os.path.isdir(book_dir):
+        _sp_psionic_cache = index
+        return index
+    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    for fn in sorted(os.listdir(book_dir)):
+        if not (fn.upper().startswith('SP') and fn.upper().endswith('.HTM')):
+            continue
+        path = os.path.join(book_dir, fn)
+        try:
+            with open(path, encoding='cp1252') as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        if '<TITLE>' not in content:
+            continue
+        raw_title = content.split('<TITLE>')[1].split('</TITLE>')[0].strip()
+        # Match power or class pages
+        if not (raw_title.endswith('Power (Skills & Powers)') or
+                raw_title.endswith('Character Class (Skills & Powers)')):
+            continue
+        # Extract the name: everything before the first "--"
+        name_part = raw_title.split('--')[0].strip()
+        key = name_part.lower()
+        if key in index:
+            continue
+        html = clean_html_file(path, 'SP', src_dir_files)
+        if html.strip():
+            index[key] = html
+    _sp_psionic_cache = index
+    return index
+
+
+_phb_class_desc_cache = None
+
+
+def _build_phb_class_desc_index():
+    """Build {title_lower → clean_html} for PHB class-chapter files (051-109).
+    For each file in that range whose <TITLE> has no '--' suffix (i.e. not a
+    table), strips '(Player's Handbook)' and lowercases. Also aliases common
+    CD-ROM title typos to their corrected spellings so callers can look up by
+    canonical name. First match per title wins; skips empty pages."""
+    global _phb_class_desc_cache
+    if _phb_class_desc_cache is not None:
+        return _phb_class_desc_cache
+    book_dir = os.path.join(SOURCE_BASE, 'PHB')
+    index = {}
+    if not os.path.isdir(book_dir):
+        _phb_class_desc_cache = index
+        return index
+    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    all_files = sorted([
+        f for f in os.listdir(book_dir)
+        if f.upper().startswith('PHB') and f.upper().endswith('.HTM')
+    ])
+    for fn in all_files:
+        num_str = fn.upper().replace('PHB', '').replace('.HTM', '')
+        try:    n = int(num_str)
+        except: continue
+        if not (51 <= n <= 109):
+            continue
+        path = os.path.join(book_dir, fn)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding='cp1252') as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        if '<TITLE>' not in content:
+            continue
+        raw_title = content.split('<TITLE>')[1].split('</TITLE>')[0].strip()
+        # Strip book-name suffix
+        title = re.sub(r"\s*\(Player's Handbook\)", '', raw_title, flags=re.I).strip()
+        # Skip table-of-contents and chapter-intro entries (have "--" in title)
+        if '--' in title or not title:
+            continue
+        key = title.lower()
+        if key in index:
+            continue
+        html = clean_html_file(path, 'PHB', src_dir_files)
+        if not html.strip():
+            continue
+        index[key] = html
+        # Alias CD-ROM typos to corrected spellings ("Speicalist" → "Specialist")
+        corrected = re.sub(r'\bspeicalist\b', 'specialist', key)
+        if corrected != key and corrected not in index:
+            index[corrected] = html
+    _phb_class_desc_cache = index
+    return index
+
+
+def _get_class_desc(cls_name, group, class_descs):
+    """Look up a class description from PHB chapter 3 HTML (class_descs), with a
+    S&P fallback for the Psionicist (not in PHB). Also tries group-level fallbacks
+    for specialist wizards and generic priest sub-classes. Returns '' when nothing
+    matches."""
+    key = cls_name.lower()
+    # Psionicist: not in PHB — source from S&P "Psionicist-- Character Class" page
+    if group == 'psionicist' or key == 'psionicist':
+        sp_index = _build_sp_psionic_index()
+        return sp_index.get('psionicist', '')
+    if key in class_descs:
+        return class_descs[key]
+    # Specialist wizard sub-classes share the "Specialist Wizards" PHB section
+    if group == 'wizard' and key not in ('mage', 'illusionist'):
+        for k, v in class_descs.items():
+            if 'specialist' in k and 'wizard' in k:
+                return v
+    # Priest group: Cleric and Druid have their own entries; fall back to
+    # the group "Priest" intro for any unnamed priest sub-class
+    if group == 'priest' and key not in ('cleric', 'druid'):
+        return class_descs.get('priest', '')
+    return ''
+
+
+# ─── Class CP (Character Points) system ──────────────────────────────────────
+#
+# Each class that has a matching S&P page gets a "(CP)" copy with no auto-granted
+# abilities and a per-class folder of purchasable CP ability items (same pattern
+# as the race CP system: `Races (CP)` / `Racial CP Abilities`).
+#
+# _SP_CLASS_FILES maps class names to their S&P page relative paths.
+# These are FILE REFERENCES only — no game data is hardcoded here.
+# Specialist wizards share SP00092.HTM; abilities are written once per unique file.
+
+_SP_CLASS_FILES = {
+    'Fighter':     'SP/SP00064.HTM',
+    'Paladin':     'SP/SP00065.HTM',
+    'Ranger':      'SP/SP00066.HTM',
+    'Thief':       'SP/SP00068.HTM',
+    'Bard':        'SP/SP00077.HTM',
+    'Cleric':      'SP/SP00084.HTM',
+    'Druid':       'SP/SP00087.HTM',
+    'Mage':        'SP/SP00089.HTM',
+    # Standard PHB specialist wizards share SP00092
+    'Abjurer':     'SP/SP00092.HTM',
+    'Conjurer':    'SP/SP00092.HTM',
+    'Diviner':     'SP/SP00092.HTM',
+    'Enchanter':   'SP/SP00092.HTM',
+    'Illusionist': 'SP/SP00092.HTM',
+    'Invoker':     'SP/SP00092.HTM',
+    'Necromancer': 'SP/SP00092.HTM',
+    'Transmuter':  'SP/SP00092.HTM',
+    'Psionicist':  'SP/SP00094.HTM',
+}
+
+# Friendly folder label per unique SP file (for shared pages like specialist wizards)
+_SP_CLASS_FOLDER_LABELS = {
+    'SP/SP00092.HTM': 'Specialist Wizards',
+}
+
+
+def _class_cp_budget(cls_name):
+    """Parse the S&P class page for 'N character points' and return N.
+    Returns None when no CP page is mapped or budget cannot be found."""
+    rel = _SP_CLASS_FILES.get(cls_name)
+    if not rel:
+        return None
+    path = os.path.join(SOURCE_BASE, rel)
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='cp1252') as f:
+        txt = BeautifulSoup(f.read(), 'html.parser').get_text(' ', strip=True)
+    m = re.search(r'(\d+)\s+character\s+points', txt, re.I)
+    return int(m.group(1)) if m else None
+
+
+def _parse_sp_class_abilities_section(sp_rel):
+    """Parse a S&P class page into [(label_with_cost, html), ...].
+    Abilities are red (#ff0000) bold SIZE=3 headings matching '(N):' at end.
+    Descriptions are the normal SIZE=3 text that follows each heading until the
+    next heading or end of content."""
+    path = os.path.join(SOURCE_BASE, sp_rel)
+    if not os.path.exists(path):
+        return []
+    with open(path, 'r', encoding='cp1252') as f:
+        soup = BeautifulSoup(f.read(), 'html.parser')
+
+    # Cost suffix: "(N):", "(N/M):", "(N/M/P):", "(N+):" — colon is part of the heading
+    _COST_RE = re.compile(r'\([\d+/]+\)\s*:?\s*$')
+    out = []
+    current_label  = None
+    current_chunks = []
+
+    def _flush():
+        if current_label and current_chunks:
+            text = ' '.join(current_chunks).strip()
+            if text:
+                out.append((current_label, f'<p>{text}</p>'))
+
+    body = soup.find('body') or soup
+    for elem in body.find_all('font'):
+        color = str(elem.get('color') or '').lower()
+        size  = elem.get('size', '')
+        bold  = bool(elem.find('b'))
+        txt   = elem.get_text(' ', strip=True)
+        if not txt:
+            continue
+        if color == '#ff0000' and size == '3' and bold and _COST_RE.search(txt):
+            _flush()
+            current_label  = txt.rstrip(':').strip()
+            current_chunks = []
+        elif size == '3' and color not in ('#ff0000', '#008000') and current_label:
+            current_chunks.append(txt)
+    _flush()
+    return out
+
+
+# ─── Class ability generation ──────────────────────────────────────────────────
+#
+# Each class item gets a set of Ability sub-items (written to adnd2-classes) and
+# cross-pack Skill links (pointing to adnd2-skills thieving-skill items).
+#
+# Pattern mirrors the race ability system: _class_abilities_for() returns a list
+# of spec dicts; migrate_classes() mints the Ability/Effect documents and builds
+# the class item's system.itemList.
+#
+# COPYRIGHT: all labels, HTML descriptions, and numeric values are read at runtime
+# from the PHB/S&P HTML files. Only parse anchors (regex patterns, English section
+# names) and ARS schema keys are hardcoded below.
+
+# ── Regex patterns that map a PHB <strong> lead sentence to an ability name ──
+# Key: the pattern itself is a REFERENCE (what to look for), not game content.
+_CLASS_ABILITY_LEAD_RE = [
+    (re.compile(r'detect.*evil',               re.I), 'Detect Evil'),
+    (re.compile(r'saving throw',               re.I), 'Saving Throw Bonus'),
+    (re.compile(r'lay.*hands|laying.*hands',   re.I), 'Lay on Hands'),
+    (re.compile(r'cure.*disease',              re.I), 'Cure Disease'),
+    (re.compile(r'aura of protection',         re.I), 'Protection From Evil, 10\' Radius'),
+    (re.compile(r'holy sword',                 re.I), 'Circle of Power'),
+    (re.compile(r'turn undead',                re.I), 'Turn Undead'),
+    (re.compile(r'war.?horse',                 re.I), 'War Horse'),
+    (re.compile(r'paladin.*priest spells|priest spells.*paladin', re.I),
+     'Priest Spells'),
+    (re.compile(r'not possess.*magical|magical items',  re.I), 'Code of Conduct'),
+    (re.compile(r'never retains wealth|retains wealth', re.I), 'Code of Conduct'),
+    (re.compile(r'must tithe',                 re.I), 'Code of Conduct'),
+    (re.compile(r'does not attract.*follower',  re.I), 'Code of Conduct'),
+    (re.compile(r'employ only.*henchmen',       re.I), 'Code of Conduct'),
+    # Ranger bullets
+    (re.compile(r'trained.*untamed|animal.*empathy|adept.*creatures', re.I),
+     'Animal Empathy'),
+    (re.compile(r'ranger.*priest spells|priest spells.*ranger|ranger.*learn priest', re.I),
+     'Priest Spells'),
+    (re.compile(r'castle|fort|stronghold',     re.I), 'Stronghold'),
+    (re.compile(r'attract.*follower|followers.*arrive|attracts.*follower', re.I),
+     'Followers'),
+    (re.compile(r'code of behavior|ranger.*code',  re.I), 'Code of Conduct'),
+    # Bard skill bullets (already clean names)
+    (re.compile(r'^Climb Walls$',              re.I), 'Climb Walls'),
+    (re.compile(r'^Detect Noise$',             re.I), 'Detect Noise'),
+    (re.compile(r'^Pick Pockets$',             re.I), 'Pick Pockets'),
+    (re.compile(r'^Read Languages$',           re.I), 'Read Languages'),
+    # Bard special abilities
+    (re.compile(r'influence.*reaction',        re.I), 'Influence Reactions'),
+    (re.compile(r'music.*poetry|rally.*morale|bard.*inspire', re.I), 'Rally Allies'),
+    (re.compile(r'counter.*effect.*song|counter.*songs', re.I), 'Counter Song'),
+    (re.compile(r'bards.*learn.*little|bit of everything|legend.*lore', re.I), 'Legend Lore'),
+    (re.compile(r'wizard.*spell.*bard|bard.*cast.*spell', re.I), 'Wizard Spell Use'),
+]
+
+# Thieving skill names used as parse anchors when linking to adnd2-skills items
+_THIEVING_SKILL_NAMES = [
+    'Pick Pockets', 'Open Locks', 'Find/Remove Traps',
+    'Move Silently', 'Hide in Shadows', 'Detect Noise',
+    'Climb Walls', 'Read Languages',
+]
+# Subset granted to bards
+_BARD_THIEVING_SKILLS = frozenset({
+    'Climb Walls', 'Detect Noise', 'Pick Pockets', 'Read Languages',
+})
+
+
+def _class_ability_icon(name):
+    """Pick a verified Foundry webp icon for a class ability from its canonical name.
+    All paths validated against FVTT/public/icons/. No SVG fallback — use a
+    recognisable webp for every case."""
+    low = name.lower()
+    # ── Holy / Divine ──────────────────────────────────────────────────────────
+    if 'detect evil'      in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'lay on hands'     in low: return 'icons/magic/life/heart-glowing-red.webp'
+    if 'cure disease'     in low: return 'icons/magic/life/cross-yellow-green.webp'
+    if 'expert healer'    in low: return 'icons/magic/life/cross-flared-green.webp'
+    if 'curative'         in low: return 'icons/magic/life/heart-cross-strong-green.webp'
+    if 'healing'          in low: return 'icons/magic/life/heart-cross-strong-green.webp'
+    if 'turn undead'      in low or 'detect undead' in low:
+        return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'protection'       in low: return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'circle of power'  in low: return 'icons/magic/holy/prayer-hands-glowing-yellow-white.webp'
+    if 'priestly wizard'  in low or 'wizardly priest' in low or 'warrior-priest' in low or 'warrior priest' in low:
+        return 'icons/magic/holy/prayer-hands-glowing-yellow-green.webp'
+    if 'know alignment'   in low: return 'icons/magic/perception/orb-eye-scrying.webp'
+    # ── Saving throws / Resistances ────────────────────────────────────────────
+    if 'saving throw'     in low: return 'icons/skills/social/intimidation-impressing.webp'
+    if 'resist energy'    in low: return 'icons/magic/defensive/barrier-shield-dome-deflect-blue.webp'
+    if 'magic resistance' in low or 'spell resistance' in low:
+        return 'icons/magic/defensive/barrier-shield-dome-deflect-teal.webp'
+    if 'resist charm' in low or 'charm resistance' in low or 'resistance to sleep' in low or 'sound resistance' in low:
+        return 'icons/magic/defensive/barrier-shield-dome-blue-purple.webp'
+    if 'defense bonus'    in low: return 'icons/magic/defensive/armor-shield-barrier-steel.webp'
+    if 'poison resistance' in low: return 'icons/skills/toxins/symbol-poison-drop-skull-green.webp'
+    if 'cold resistance'  in low: return 'icons/magic/water/barrier-ice-crystal-wall-faceted-blue.webp'
+    if 'fire' in low and 'electrical' in low: return 'icons/magic/fire/flame-burning-campfire-orange.webp'
+    if 'fire' in low or 'lightning' in low or 'electrical' in low:
+        return 'icons/magic/fire/flame-burning-campfire-orange.webp'
+    if 'immunity' in low or 'immune' in low:
+        return 'icons/magic/defensive/shield-barrier-glowing-triangle-green.webp'
+    if 'guarded mind'     in low or 'mental defense' in low:
+        return 'icons/magic/defensive/shield-barrier-blue.webp'
+    # ── HP / Health ────────────────────────────────────────────────────────────
+    if 'hit point' in low or '1d12' in low or 'health' in low:
+        return 'icons/magic/life/heart-cross-strong-blue.webp'
+    # ── Armor ──────────────────────────────────────────────────────────────────
+    if 'armored wizard' in low or 'limited armor' in low or 'armor use' in low:
+        return 'icons/equipment/chest/breastplate-banded-steel.webp'
+    if 'weapon allowance' in low or 'weapon use' in low or 'limited weapon' in low:
+        return 'icons/weapons/swords/greatsword-crossguard-silver.webp'
+    # ── Combat / Weapons ───────────────────────────────────────────────────────
+    if 'weapon specialization' in low or 'multiple specialization' in low:
+        return 'icons/weapons/swords/greatsword-crossguard-embossed-gold.webp'
+    if 'two-weapon' in low or 'two weapon' in low:
+        return 'icons/weapons/swords/greatsword-crossguard-blue.webp'
+    if 'combat bonus'     in low: return 'icons/skills/melee/blade-tips-triple-steel.webp'
+    if 'attack mode'      in low: return 'icons/skills/melee/blade-tips-triple-steel.webp'
+    if 'sneak attack'     in low: return 'icons/weapons/daggers/dagger-bone-black.webp'
+    if 'backstab'         in low: return 'icons/weapons/daggers/dagger-curved-black.webp'
+    if 'bow bonus'        in low: return 'icons/skills/ranged/archery-bow-attack-yellow.webp'
+    if 'war machines'     in low: return 'icons/weapons/artillery/cannon-banded.webp'
+    # ── Movement / Stealth ─────────────────────────────────────────────────────
+    if 'increased movement' in low: return 'icons/magic/movement/acceleration-speed-tech-blue.webp'
+    if 'hide in shadow'   in low or 'hide in shadow' in low:
+        return 'icons/magic/air/air-smoke-casting.webp'
+    if 'move silently'    in low or 'stealth' in low:
+        return 'icons/magic/air/air-smoke-casting.webp'
+    if 'climbing'         in low or 'climb walls' in low or 'climb' in low:
+        return 'icons/skills/movement/figure-running-gray.webp'
+    # ── Detection / Perception ─────────────────────────────────────────────────
+    if 'detect magic'     in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'detect illusion'  in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'detect noise'     in low: return 'icons/magic/sonic/bell-alarm-red-purple.webp'
+    if 'read magic'       in low: return 'icons/tools/scribal/ink-quill-red.webp'
+    # ── Spells / Magic ─────────────────────────────────────────────────────────
+    if 'priest spell'     in low: return 'icons/magic/air/air-burst-spiral-teal-green.webp'
+    if 'wizard spell'     in low or 'automatic spell' in low or 'bonus spell' in low:
+        return 'icons/magic/symbols/runes-star-blue.webp'
+    if 'casting reduction' in low or 'spell duration' in low or 'extend duration' in low:
+        return 'icons/magic/time/hourglass-tilted-glowing-gold.webp'
+    if 'range boost'      in low or 'range boost' in low:
+        return 'icons/magic/symbols/arrowhead-green.webp'
+    if 'intense magic'    in low or 'no components' in low:
+        return 'icons/magic/symbols/cog-glowing-green.webp'
+    if 'elemental spell'  in low: return 'icons/magic/symbols/elements-air-earth-fire-water.webp'
+    if 'learning bonus'   in low or 'research bonus' in low:
+        return 'icons/skills/trades/academics-book-study-runes.webp'
+    if 'learning penalty' in low or 'opposition school' in low or 'limited magical' in low:
+        return 'icons/magic/symbols/cross-circle-blue.webp'
+    if 'scroll use'       in low: return 'icons/tools/scribal/ink-quill-pink.webp'
+    # ── Nature / Druid ─────────────────────────────────────────────────────────
+    if 'war horse' in low or ('horse' in low and 'war' in low):
+        return 'icons/environment/creatures/horse-brown.webp'
+    if 'faithful mount'   in low: return 'icons/environment/creatures/horse-brown.webp'
+    if 'shapechange'      in low or ('shape' in low and 'change' in low):
+        return 'icons/magic/nature/seed-acorn-glowing-green.webp'
+    if 'identify'         in low: return 'icons/magic/nature/leaf-glow-green.webp'
+    if 'pass without trace' in low: return 'icons/magic/nature/vines-thorned-glow-green.webp'
+    if 'bonus spell'      in low and 'druid' in low: return 'icons/magic/nature/leaf-elm-beam-green.webp'
+    if 'purify water'     in low: return 'icons/magic/water/water-drop-swirl-blue.webp'
+    if 'communicate with' in low or 'speak with' in low:
+        return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'animal'           in low or 'empathy' in low:
+        return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'tracking'         in low: return 'icons/magic/nature/wolf-paw-glow-orange.webp'
+    if 'species enemy'    in low or 'special enemy' in low:
+        return 'icons/magic/nature/wolf-paw-glow-large-orange.webp'
+    if 'secret language'  in low: return 'icons/skills/trades/academics-merchant-scribe.webp'
+    # ── Thieving skills ────────────────────────────────────────────────────────
+    if 'open locks'       in low or 'escaping bonds' in low or 'find' in low and 'trap' in low:
+        return 'icons/skills/trades/security-lockpicking-chest-blue.webp'
+    if 'pick pocket'      in low or 'bribe' in low:
+        return 'icons/skills/trades/security-locksmith-key-gray.webp'
+    if 'read language'    in low or 'thieves\' cant' in low:
+        return 'icons/skills/trades/academics-merchant-scribe.webp'
+    if 'tunneling'        in low or 'building' in low:
+        return 'icons/skills/trades/construction-mason-bricklayer-red.webp'
+    # ── Psionic ────────────────────────────────────────────────────────────────
+    if 'psp bonus'        in low or 'psychic adept' in low or 'penetrating mind' in low:
+        return 'icons/magic/perception/third-eye-blue-red.webp'
+    if 'contact'          in low: return 'icons/magic/perception/eye-ringed-green.webp'
+    if 'mental'           in low: return 'icons/magic/defensive/shield-barrier-blue.webp'
+    if 'defense mode'     in low or 'guarded mind' in low:
+        return 'icons/magic/defensive/shield-barrier-dome-deflect-blue.webp'
+    # ── Social / Leadership ────────────────────────────────────────────────────
+    if 'leadership'       in low or 'supervisor' in low:
+        return 'icons/skills/social/diplomacy-peace-alliance.webp'
+    if 'alter moods'      in low or 'influence' in low or 'reaction' in low:
+        return 'icons/skills/social/diplomacy-handshake-yellow.webp'
+    if 'follower'         in low: return 'icons/skills/social/diplomacy-handshake.webp'
+    if 'stronghold'       in low: return 'icons/environment/settlement/castle.webp'
+    if 'code of conduct' in low or 'code of behavior' in low:
+        return 'icons/equipment/shield/heater-wooden-blue.webp'
+    # ── Bard ───────────────────────────────────────────────────────────────────
+    if 'song' in low or 'music' in low or 'rally' in low or 'counter effect' in low:
+        return 'icons/tools/instruments/harp-gold-glowing.webp'
+    if 'counter'          in low: return 'icons/skills/trades/music-notes-sound-blue.webp'
+    if 'history'          in low or 'lore' in low or 'legend' in low:
+        return 'icons/skills/trades/academics-book-study-purple.webp'
+    # ── Catch-all (verified webp, not SVG) ────────────────────────────────────
+    return 'icons/skills/trades/academics-investigation-study-blue.webp'
+
+
+def _class_ability_effect_changes(name, lead_text=''):
+    """Map a class ability canonical name to ARS v14 effect change dicts.
+    Parses any numeric bonus from lead_text at runtime rather than hardcoding."""
+    low = name.lower()
+
+    def _save(formula, props=''):
+        return [{'key': 'system.mods.saves.all', 'type': 'custom',
+                 'value': {'formula': formula, 'properties': props},
+                 'priority': 20, 'phase': 'initial', 'last': ''}]
+
+    if 'saving throw bonus' in low:
+        # Parse the bonus magnitude from the PHB text at runtime
+        m = re.search(r'\+\s*(\d+)', lead_text)
+        bonus = m.group(1) if m else '1'
+        return _save(bonus)
+
+    if 'fire' in low and ('electrical' in low or 'lightning' in low):
+        m = re.search(r'\+\s*(\d+)', lead_text)
+        bonus = m.group(1) if m else '2'
+        return _save(bonus, 'fire,lightning')
+
+    return []
+
+
+def _class_ability_action_groups(name):
+    """Build ARS action groups for class abilities with clickable mechanics."""
+    low = name.lower()
+    icon = _class_ability_icon(name)
+
+    if 'turn undead' in low:
+        return [_make_action_group('Turn Undead', icon, [
+            _make_action('Turn Undead', type_='use', targeting='template',
+                         img=icon, save_type='none'),
+        ])]
+
+    if 'lay on hands' in low:
+        return [_make_action_group('Lay on Hands', icon, [
+            _make_action('Heal', type_='heal', targeting='single', img=icon,
+                         formula='@rank.levels.max*2'),
+        ])]
+
+    if 'cure disease' in low:
+        return [_make_action_group('Cure Disease', icon, [
+            _make_action('Cure Disease', type_='use', targeting='single',
+                         img=icon, save_type='none'),
+        ])]
+
+    if 'shapechange' in low:
+        return [_make_action_group('Shapechange', icon, [
+            _make_action('Shapechange', type_='use', targeting='self',
+                         img=icon, charges_per_day=3),
+        ])]
+
+    if 'influence reactions' in low:
+        return [_make_action_group('Influence Reactions', icon, [
+            _make_action('Influence Reactions', type_='use', targeting='template',
+                         img=icon),
+        ])]
+
+    if 'counter song' in low:
+        return [_make_action_group('Counter Song', icon, [
+            _make_action('Counter Song', type_='use', targeting='self',
+                         img=icon),
+        ])]
+
+    if 'legend lore' in low:
+        return [_make_action_group('Legend Lore', icon, [
+            _make_action('Legend Lore', type_='use', targeting='self',
+                         img=icon),
+        ])]
+
+    return []
+
+
+def _parse_strong_ability_blocks(html):
+    """Extract (lead_text, enclosing_p_html) pairs from a class HTML page.
+    Each <strong> element is a bullet lead; its enclosing <p> is the full block."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    blocks = []
+    seen_leads = set()
+    for strong in soup.find_all('strong'):
+        lead = strong.get_text(strip=True)
+        if not lead or len(lead) < 5 or lead in seen_leads:
+            continue
+        seen_leads.add(lead)
+        # Use the enclosing paragraph for the full block
+        parent = strong.parent
+        block_html = str(parent) if parent and parent.name else str(strong)
+        blocks.append((lead, block_html))
+    return blocks
+
+
+def _ranger_extra_abilities(html):
+    """Extract Ranger prose abilities (tracking, stealth, species enemy) that
+    are not in <strong> bullet leads. Returns [(name, para_html), ...]."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    extras = []
+    seen = set()
+    # Anchors: English concepts used as parse references (not copyrighted values)
+    ANCHORS = [
+        (re.compile(r'tracking proficiency|has a tracking|tracking skill', re.I),
+         'Tracking'),
+        (re.compile(r'move with great stealth|hiding and moving silently|'
+                    r'move silently.*natural|hide.*natural surroundings', re.I),
+         'Stealth'),
+        (re.compile(r'particular creature|species enemy|marauds their homeland', re.I),
+         'Species Enemy'),
+    ]
+    for para in soup.find_all('p'):
+        text = para.get_text(strip=True)
+        for pat, name in ANCHORS:
+            if pat.search(text) and name not in seen:
+                seen.add(name)
+                extras.append((name, str(para)))
+                break
+    return extras
+
+
+def _druid_granted_abilities():
+    """Parse PHB00088.HTM (Granted Powers-- Druid) into [(name, para_html), ...]
+    at runtime. Abilities are separated by 'He can...' or 'He gains...' sentences."""
+    book_dir = os.path.join(SOURCE_BASE, 'PHB')
+    path = os.path.join(book_dir, 'PHB00088.HTM')
+    if not os.path.exists(path):
+        return []
+    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    html = clean_html_file(path, 'PHB', src_files)
+    soup = BeautifulSoup(html, 'html.parser')
+
+    ANCHORS = [
+        (re.compile(r'saving throw.*fire|fire.*electrical|fire.*attack', re.I),
+         'Saving Throw Bonus vs Fire/Electricity'),
+        (re.compile(r'secret language|druidic language', re.I), 'Druidic Language'),
+        (re.compile(r'identify plants|plants.*animals.*pure water', re.I),
+         'Identify Plants, Animals, and Pure Water'),
+        (re.compile(r'pass through overgrown|pass.*without.*trail', re.I),
+         'Pass Without Trace'),
+        (re.compile(r'language.*woodland|woodland.*creature.*language', re.I),
+         'Woodland Creature Languages'),
+        (re.compile(r'immune.*charm.*woodland|charm.*woodland', re.I),
+         'Immunity to Charm'),
+        (re.compile(r'shapechange|shape.*reptile|reptile.*bird.*mammal', re.I),
+         'Shapechange'),
+    ]
+
+    results = []
+    seen = set()
+    for para in soup.find_all('p'):
+        text = para.get_text(strip=True)
+        if not text:
+            continue
+        for pat, name in ANCHORS:
+            if pat.search(text) and name not in seen:
+                seen.add(name)
+                results.append((name, str(para), text))
+                break
+    return results
+
+
+def _cleric_turn_undead_block(html):
+    """Extract the paragraph containing Turn Undead from the Cleric description."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, 'html.parser')
+    pat = re.compile(r'turn undead', re.I)
+    for para in soup.find_all('p'):
+        if pat.search(para.get_text()):
+            return str(para)
+    return None
+
+
+def _thief_backstab_block(html):
+    """Extract Backstab ability block from PHB class text or PHB00100 explanations."""
+    # Try primary class description first
+    if html:
+        soup = BeautifulSoup(html, 'html.parser')
+        pat = re.compile(r'backstab', re.I)
+        for para in soup.find_all('p'):
+            if pat.search(para.get_text()):
+                return str(para)
+    # Fall back to thieving skill explanations page
+    book_dir = os.path.join(SOURCE_BASE, 'PHB')
+    path = os.path.join(book_dir, 'PHB00100.HTM')
+    if not os.path.exists(path):
+        return None
+    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    expl_html = clean_html_file(path, 'PHB', src_files)
+    soup2 = BeautifulSoup(expl_html, 'html.parser')
+    pat = re.compile(r'backstab', re.I)
+    paras = []
+    capture = False
+    for tag in soup2.find_all(['p', 'h3', 'h4', 'strong']):
+        if pat.search(tag.get_text()) and tag.name in ('strong', 'h3', 'h4'):
+            capture = True
+        if capture and tag.name == 'p':
+            paras.append(str(tag))
+            if len(paras) >= 3:
+                break
+    return ''.join(paras) if paras else None
+
+
+def _load_skill_link_map():
+    """Build {skill_name_lower → (id, name, img, pack)} from the adnd2-skills
+    staging JSON, written by migrate_skills() earlier in the run."""
+    skills_src = os.path.join(_PACK_SRC_BASE,
+                              os.path.basename(OUTPUT_PACKS['skills']))
+    result = {}
+    if not os.path.isdir(skills_src):
+        return result
+    for fn in os.listdir(skills_src):
+        if not fn.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(skills_src, fn), encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except Exception:
+            continue
+        if doc.get('type') != 'skill':
+            continue
+        name = doc.get('name', '')
+        if name:
+            result[name.lower()] = (doc['_id'], name, doc.get('img', ''), 'skills')
+    return result
+
+
+def _class_abilities_for(cls, class_descs):
+    """Return a list of ability spec dicts for a CLASS.DAT class record.
+    Each spec has: name, description (HTML), effect_changes, action_groups,
+    icon, and optionally skill_link=True (for thieving-skill itemList entries)."""
+    group = cls.get('group', '')
+    name  = cls.get('name', '')
+    desc_html = _get_class_desc(name, group, class_descs)
+    specs = []
+    seen_names = set()
+
+    def _push(spec_name, desc='', chg=None, acts=None, lead=''):
+        if not spec_name or spec_name in seen_names:
+            return
+        seen_names.add(spec_name)
+        icon = _class_ability_icon(spec_name)
+        if not chg:
+            chg = _class_ability_effect_changes(spec_name, lead)
+        if not acts:
+            acts = _class_ability_action_groups(spec_name)
+        specs.append({
+            'name':           spec_name,
+            'description':    desc,
+            'effect_changes': chg or None,
+            'action_groups':  acts or None,
+            'icon':           icon,
+        })
+
+    # ── Paladin & Ranger: <strong> bullet blocks + prose extras ──────────────
+    if name.lower() in ('paladin', 'ranger'):
+        blocks = _parse_strong_ability_blocks(desc_html)
+        for lead, block_html in blocks:
+            ability_name = None
+            for pat, aname in _CLASS_ABILITY_LEAD_RE:
+                if pat.search(lead):
+                    ability_name = aname
+                    break
+            if not ability_name:
+                words = re.sub(r'[,.].*', '', lead).split()[:4]
+                ability_name = ' '.join(w.capitalize() for w in words) if words else lead[:30]
+            _push(ability_name, block_html, lead=lead)
+        if name.lower() == 'ranger':
+            for extra_name, extra_html in _ranger_extra_abilities(desc_html):
+                _push(extra_name, extra_html)
+
+    # ── Bard: <strong> blocks EXCEPT the thieving-skill names (those become
+    #    cross-pack skill links in migrate_classes, not duplicate ability items)
+    elif name.lower() == 'bard':
+        blocks = _parse_strong_ability_blocks(desc_html)
+        for lead, block_html in blocks:
+            # Skip pure skill-name bullets — they become itemList skill links
+            if lead in _BARD_THIEVING_SKILLS:
+                continue
+            ability_name = None
+            for pat, aname in _CLASS_ABILITY_LEAD_RE:
+                if pat.search(lead):
+                    ability_name = aname
+                    break
+            if not ability_name:
+                words = re.sub(r'[,.].*', '', lead).split()[:4]
+                ability_name = ' '.join(w.capitalize() for w in words) if words else lead[:30]
+            _push(ability_name, block_html, lead=lead)
+
+    # ── Thief: Backstab ability (thieving skills themselves become skill links) ─
+    elif name.lower() == 'thief':
+        backstab_html = _thief_backstab_block(desc_html)
+        if backstab_html:
+            _push('Backstab', backstab_html)
+
+    # ── Cleric: Turn Undead from prose ────────────────────────────────────────
+    elif name.lower() == 'cleric':
+        turn_block = _cleric_turn_undead_block(desc_html)
+        _push('Turn Undead', turn_block or '')
+        _push('Priest Spells')
+
+    # ── Druid: granted powers from PHB00088 ───────────────────────────────────
+    elif name.lower() == 'druid':
+        for ab_name, para_html, para_text in _druid_granted_abilities():
+            chg = _class_ability_effect_changes(ab_name, para_text)
+            _push(ab_name, para_html, chg=chg)
+
+    return specs
+
+
+_RANGER_THIEVING_SKILLS = frozenset({'Move Silently', 'Hide in Shadows'})
+
+
+def _class_thieving_skills_for(cls_name):
+    """Return the list of thieving skill names to auto-grant for a class.
+    Thief gets all 8; Bard gets the 4 in _BARD_THIEVING_SKILLS; Ranger gets
+    Move Silently and Hide in Shadows (Table 18, PHB)."""
+    low = cls_name.lower()
+    if low == 'thief':
+        return list(_THIEVING_SKILL_NAMES)
+    if low == 'bard':
+        return [s for s in _THIEVING_SKILL_NAMES if s in _BARD_THIEVING_SKILLS]
+    if low == 'ranger':
+        return [s for s in _THIEVING_SKILL_NAMES if s in _RANGER_THIEVING_SKILLS]
+    return []
+
 
 def migrate_classes():
     """Phase 3: write the classes pack — a `class` Item per CLASS.DAT record,
-    foldered by group (Warriors/Rogues/Priests/Wizards/Psionicists). Returns count."""
+    foldered by group (Warriors/Rogues/Priests/Wizards/Psionicists).
+    Each class also gets Ability sub-items (descriptive + mechanical effects where
+    parseable) and cross-pack Skill links to thieving skills (Thief/Bard).
+    Must run AFTER migrate_skills() so the skill staging JSON is readable.
+    Returns count."""
     print("\n=== Classes (CLASS.DAT) ===")
     classes = parse_classes()
     if not classes:
         print("  No classes parsed."); return 0
+    class_descs = _build_phb_class_desc_index()
+    print(f"  PHB class descriptions indexed: {len(class_descs)} titles")
+    # Load skill link map (requires migrate_skills() to have run first)
+    skill_map = _load_skill_link_map()
+    print(f"  Skills available for thieving-skill links: {len(skill_map)}")
+
     db = _open_pack(OUTPUT_PACKS['classes'])
-    # Folder hierarchy by class group (from CLASS.DAT). Specialist wizards
-    # all live under 'Wizard' too; 'Psionicist' is its own group from PSIONIC.DAT.
     folders = {}
     for label, sort in [('Warriors', 100000), ('Rogues', 200000),
                         ('Priests', 300000), ('Wizards', 400000),
@@ -6745,18 +7534,209 @@ def migrate_classes():
         'wizard':     'Wizards',
         'psionicist': 'Psionicists',
     }
+
+    # ── Ability folder hierarchy: Class Abilities → {ClassName} ──────────────
+    abilities_root_id = make_id()
+    abilities_root = make_compendium_folder(abilities_root_id, 'Class Abilities',
+                                            'Item', sort=600000)
+    folders['Class Abilities'] = abilities_root
+    # One sub-folder per class that has abilities; created lazily below.
+    ability_folders = {}   # cls_name → folder _id
+
+    no_desc = 0
+    total_abilities = 0
+    total_effects   = 0
+    total_skill_links = 0
     count = 0
+    written_class_docs = {}   # cls_name → written class item dict (for CP deep-copy)
+
     for cls in classes:
-        item = make_class_item(cls)
-        bucket = GROUP_FOLDER.get(cls.get('group',''), None)
+        desc   = _get_class_desc(cls['name'], cls.get('group', ''), class_descs)
+        if not desc:
+            no_desc += 1
+        item   = make_class_item(cls, description=desc)
+        cls_id = item['_id']
+        cls_uuid = f"Compendium.{MODULE_ID}.adnd2-classes.Item.{cls_id}"
+
+        # ── Generate and write Ability sub-items ─────────────────────────────
+        specs = _class_abilities_for(cls, class_descs)
+        item_list_refs = []
+        if specs:
+            # Create a per-class ability sub-folder on first use
+            if cls['name'] not in ability_folders:
+                sort_val = count * 1000 + 100
+                ab_fid = make_id()
+                ab_folder = make_compendium_folder(
+                    ab_fid, cls['name'], 'Item',
+                    sort=sort_val, parent=abilities_root_id)
+                ability_folders[cls['name']] = ab_fid
+                db.put(f'!folders!{ab_fid}'.encode(), json.dumps(ab_folder).encode())
+
+        for spec in specs:
+            ab, ef = make_ability_item(
+                spec['name'], spec['icon'],
+                description=spec['description'],
+                effect_changes=spec['effect_changes'],
+                action_groups=spec['action_groups'],
+            )
+            ab['folder'] = ability_folders.get(cls['name'])
+            db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
+            if ef:
+                db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
+                       json.dumps(ef).encode())
+                total_effects += 1
+            total_abilities += 1
+            item_list_refs.append({
+                'id':       ab['_id'],
+                'uuid':     f'Item.{ab["_id"]}',
+                'sourceuuid': cls_uuid,
+                'type':     'ability',
+                'name':     spec['name'],
+                'img':      spec['icon'],
+                'level':    '0',
+            })
+
+        # ── Add thieving skill cross-pack links (Thief and Bard) ─────────────
+        for skill_name in _class_thieving_skills_for(cls['name']):
+            entry = skill_map.get(skill_name.lower())
+            if not entry:
+                continue
+            sid, sname, simg, spack = entry
+            item_list_refs.append({
+                'id':       sid,
+                'uuid':     f'Compendium.{MODULE_ID}.adnd2-{spack}.Item.{sid}',
+                'sourceuuid': cls_uuid,
+                'type':     'skill',
+                'name':     sname,
+                'img':      simg,
+                'level':    '0',
+            })
+            total_skill_links += 1
+
+        item['system']['itemList'] = item_list_refs
+
+        bucket = GROUP_FOLDER.get(cls.get('group', ''), None)
         if bucket:
             item['folder'] = folders[bucket]['_id']
-        db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+        db.put(f'!items!{cls_id}'.encode(), json.dumps(item).encode())
+        written_class_docs[cls['name']] = item
         count += 1
+
+    # ── 2. CP class copies + per-class CP abilities (S&P system) ─────────────
+    cp_classes_folder_id  = make_id()
+    cp_classes_folder     = make_compendium_folder(
+        cp_classes_folder_id, 'Classes (CP)', 'Item', sort=700000)
+    cp_abilities_root_id  = make_id()
+    cp_abilities_root     = make_compendium_folder(
+        cp_abilities_root_id, 'Class CP Abilities', 'Item', sort=800000)
+    db.put(f'!folders!{cp_classes_folder_id}'.encode(),
+           json.dumps(cp_classes_folder).encode())
+    db.put(f'!folders!{cp_abilities_root_id}'.encode(),
+           json.dumps(cp_abilities_root).encode())
+
+    keep_lower_words = {'or', 'and', 'of', 'in', 'the', 'a', 'to', 'with', 'for',
+                        'from', 'on', 'at', 'by'}
+    def _title_case(s):
+        words = s.split()
+        return ' '.join(
+            w.capitalize() if (i == 0 or w.lower() not in keep_lower_words)
+                          else w.lower()
+            for i, w in enumerate(words)
+        )
+
+    cp_classes_written   = 0
+    cp_abilities_written = 0
+    cp_effects_written   = 0
+    # Track which SP files have had their abilities written to avoid duplicates
+    # (all standard specialist wizards share SP00092.HTM).
+    written_sp_files  = {}   # sp_rel → ability_folder_id
+
+    for cls in classes:
+        cls_name = cls['name']
+        sp_rel   = _SP_CLASS_FILES.get(cls_name)
+        src      = written_class_docs.get(cls_name)
+        if not sp_rel or not src:
+            continue
+        cp_budget = _class_cp_budget(cls_name)
+        if cp_budget is None:
+            continue
+
+        # ── CP class copy ─────────────────────────────────────────────────────
+        cp_doc  = json.loads(json.dumps(src))
+        cp_id   = make_id()
+        cp_doc['_id']    = cp_id
+        cp_doc['name']   = f'{cls_name} (CP)'
+        cp_doc['folder'] = cp_classes_folder_id
+        cp_doc['_stats'] = _stats_block()
+        cp_doc['flags']  = dict(src.get('flags') or {})
+        # Strip auto-granted itemList (player buys abilities à la carte)
+        cp_doc['system']['itemList'] = []
+        # Determine the abilities folder label for the banner
+        ab_folder_label = _SP_CLASS_FOLDER_LABELS.get(sp_rel, cls_name)
+        banner = (
+            f'<h2>Character Points budget: {cp_budget} CP</h2>\n'
+            f'<p><em>Spend on class abilities purchased separately '
+            f'from the "{ab_folder_label} CP Abilities" folder.</em></p>\n'
+            f'<hr/>\n'
+        )
+        cp_doc['system']['description'] = (
+            banner + (src['system'].get('description') or ''))
+        db.put(f'!items!{cp_id}'.encode(), json.dumps(cp_doc).encode())
+        cp_classes_written += 1
+
+        # ── Per-class (or per-shared-file) CP abilities folder + items ────────
+        if sp_rel not in written_sp_files:
+            # Create a new abilities sub-folder for this SP file
+            ab_fid = make_id()
+            ab_folder = make_compendium_folder(
+                ab_fid, f'{ab_folder_label} CP Abilities', 'Item',
+                sort=100000 + len(written_sp_files) * 10000,
+                parent=cp_abilities_root_id)
+            db.put(f'!folders!{ab_fid}'.encode(), json.dumps(ab_folder).encode())
+            written_sp_files[sp_rel] = ab_fid
+
+            for label, body_html in _parse_sp_class_abilities_section(sp_rel):
+                # Parse "Name (cost)" format — cost may be N, N/M, N/M/P, or N+
+                m = re.match(r'^(.*?)\s*\(([\d+/]+)\)\s*$',
+                             label.strip())
+                if not m:
+                    continue
+                raw_name  = m.group(1).strip()
+                cost_str  = m.group(2)       # e.g. "5", "5/10", "5+"
+                display   = f'{_title_case(raw_name)} ({cost_str} CP)'
+                icon      = _class_ability_icon(raw_name)
+                mech      = _class_ability_effect_changes(raw_name)
+                acts      = _class_ability_action_groups(raw_name)
+                ab, ef    = make_ability_item(
+                    display, icon,
+                    description=body_html,
+                    effect_changes=(mech or None),
+                    action_groups=(acts or None),
+                )
+                # Store the first numeric cost for flag metadata
+                m_cost = re.match(r'\d+', cost_str)
+                first_cost = int(m_cost.group(0)) if m_cost else 0
+                ab['folder'] = ab_fid
+                ab['flags']  = {'adnd2': {'cpCost': first_cost,
+                                          'cpClass': ab_folder_label}}
+                db.put(f'!items!{ab["_id"]}'.encode(),
+                       json.dumps(ab).encode())
+                if ef:
+                    db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
+                           json.dumps(ef).encode())
+                    cp_effects_written += 1
+                cp_abilities_written += 1
+
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
-    print(f"  → {count} classes in {len(folders)} folders")
+    print(f"  → {count} classes in {len(folders)} folders "
+          f"({no_desc} without PHB description)")
+    print(f"    {total_abilities} ability items, {total_effects} effects, "
+          f"{total_skill_links} thieving-skill links")
+    print(f"    {cp_classes_written} (CP) class copies, "
+          f"{cp_abilities_written} CP abilities "
+          f"({cp_effects_written} with mechanical effects)")
     return count
 
 
@@ -6789,7 +7769,7 @@ def migrate_items():
     for part in parts:
         img = extract_equip_icon(part.get('icon_id'), OUTPUT_IMG_ITEMS)
         item = make_part_item(part, img, base_weapons=base_weapons)
-        bucket = TYPE_FOLDER.get(item.get('type'), 'Other Items')
+        bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
         item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
@@ -6899,19 +7879,37 @@ def migrate_spells():
 
 def migrate_psionics():
     """Phase 3: write the powers pack — a `power` Item per PSIONIC.DAT record.
+    Description priority: S&P HTML (richer, formatted) > DAT plain text > ''.
     Returns count."""
     print("\n=== Psionic Powers (PSIONIC.DAT) ===")
     powers = parse_psionics()
     if not powers:
         print("  No powers parsed."); return 0
+    sp_index = _build_sp_psionic_index()
+    print(f"  S&P power pages indexed: {len(sp_index)}")
     db = _open_pack(OUTPUT_PACKS['powers'])
+    sp_hits = 0
+    dat_hits = 0
+    no_desc  = 0
     count = 0
     for power in powers:
-        item = make_power_item(power)
+        name_key = power['name'].lower()
+        sp_html  = sp_index.get(name_key, '')
+        dat_text = power.get('description', '')
+        if sp_html:
+            desc = sp_html
+            sp_hits += 1
+        elif dat_text:
+            desc = dat_text
+            dat_hits += 1
+        else:
+            desc = ''
+            no_desc += 1
+        item = make_power_item(power, description=desc)
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
     db.close()
-    print(f"  → {count} psionic powers written to {OUTPUT_PACKS['powers']}")
+    print(f"  → {count} powers  (S&P HTML: {sp_hits}, DAT text: {dat_hits}, none: {no_desc})")
     return count
 
 
@@ -7042,10 +8040,48 @@ def _match_montype_key(name, display_name, montype_data):
     return None
 
 
-def _lookup_montype_bmp(name, display_name, montype_data):
-    """Resolve a monster to its MONTYPE individual-icon filename (or None)."""
-    key = _match_montype_key(name, display_name, montype_data)
-    return montype_data.get(key) if key else None
+
+_mm_embed_index_cache = None
+
+
+def _build_mm_embed_index():
+    """Build {normalized_monster_name → (journal_id, page_id)} from the staged
+    adnd2-journals JSON files (written by db.close() before Phase 3 runs).
+    Page titles follow the pattern '{Name} (Monstrous Manual)'; we strip the
+    suffix and lowercase to get the lookup key."""
+    global _mm_embed_index_cache
+    if _mm_embed_index_cache is not None:
+        return _mm_embed_index_cache
+    journal_name = os.path.basename(OUTPUT_DB)        # "adnd2-journals"
+    journal_src  = os.path.join(_PACK_SRC_BASE, journal_name)
+    index = {}
+    if not os.path.isdir(journal_src):
+        _mm_embed_index_cache = index
+        return index
+    for fn in os.listdir(journal_src):
+        if not fn.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(journal_src, fn), encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except Exception:
+            continue
+        if doc.get('name') != 'Monster Manual':
+            continue
+        journal_id = doc.get('_id', '')
+        for page in doc.get('pages', []):
+            page_name = page.get('name', '')
+            page_id   = page.get('_id', '')
+            if not page_name or not page_id:
+                continue
+            # "Argos (Monstrous Manual)" → "argos"
+            norm = re.sub(r'\s*\([^)]*\)', '', page_name).strip().lower()
+            if norm:
+                index[norm] = (journal_id, page_id)
+        break   # only one MM journal entry
+    _mm_embed_index_cache = index
+    print(f"  MM embed index: {len(index)} pages indexed")
+    return index
 
 
 def migrate_monsters():
@@ -7082,6 +8118,7 @@ def migrate_monsters():
         folders[ch] = make_compendium_folder(fid, ch, 'Actor', sort=ord(ch)*1000)
     folders['Other'] = make_compendium_folder(make_id(), 'Other', 'Actor', sort=900000)
 
+    embed_index = _build_mm_embed_index()
     count = 0
     for monster in monsters:
         key  = _match_montype_key(monster.get('name',''), monster.get('display_name',''), montype_data)
@@ -7089,7 +8126,8 @@ def migrate_monsters():
         img  = extract_monster_icon(bmp, OUTPUT_IMG_MONSTERS) if bmp else None
         cats = _monster_categories(key, name_to_index, idx2cat)
         actor = make_monster_actor(monster, img, categories=cats,
-                                   fighter_saves=fighter_saves)
+                                   fighter_saves=fighter_saves,
+                                   embed_index=embed_index)
         name = actor.get('name','').strip()
         first = name[0].upper() if name else 'Z'
         bucket = first if first in folders else 'Other'
@@ -7160,7 +8198,7 @@ def _load_phb_nwp_table():
     # Group sections are marked by red SIZE=3 bold FONT preceding a table.
     cur_group = None
     for node in soup.find_all(['font', 'table']):
-        if node.name == 'font' and node.get('color','').lower() == '#ff0000':
+        if node.name == 'font' and str(node.get('color', '')).lower() == '#ff0000':
             txt = node.get_text(strip=True).rstrip(':').title()
             if txt in ('General', 'Priest', 'Rogue', 'Warrior', 'Wizard'):
                 cur_group = txt
@@ -7178,7 +8216,7 @@ def _load_phb_nwp_table():
                 # Find anchor file from the <a href> in this row
                 href = None
                 for a in tr.find_all('a', href=True):
-                    if a.get('href','').endswith('.htm') and '#' not in a['href']:
+                    if str(a.get('href', '')).endswith('.htm') and '#' not in a['href']:
                         href = a['href']; break
                 key = name.lower()
                 if key not in out:
@@ -7202,7 +8240,7 @@ def _load_sp_nwp_table():
     soup = BeautifulSoup(open(path, encoding='cp1252').read(), 'html.parser')
     cur_group = None
     for node in soup.find_all(['font', 'table']):
-        if node.name == 'font' and node.get('color','').lower() == '#ff0000':
+        if node.name == 'font' and str(node.get('color', '')).lower() == '#ff0000':
             raw = node.get_text(strip=True).rstrip(':').title()
             if raw in ('General','Priest','Rogue','Warrior','Wizard','Psionicist'):
                 cur_group = raw
@@ -7220,8 +8258,9 @@ def _load_sp_nwp_table():
                 ability = cells[3]
                 href = None
                 for a in tr.find_all('a', href=True):
-                    if a.get('href','').endswith('.htm') or '#' in a.get('href',''):
-                        href = a['href'].split('#')[0]; break
+                    raw_href = str(a.get('href', ''))
+                    if raw_href.endswith('.htm') or '#' in raw_href:
+                        href = raw_href.split('#')[0]; break
                 key = name.lower()
                 if key not in out:
                     out[key] = {'name': name, 'groups': set(), 'cp_cost': cp,
@@ -7393,8 +8432,8 @@ def _load_sp_weapon_groups():
     # Single-tight-group sections have <B><I>NAME</I></B> as the header and
     # the weapon list directly under it.
     for font in body.find_all('font'):
-        if font.get('color','').lower() != '#ff0000': continue
-        if font.get('size','') != '3': continue
+        if str(font.get('color', '')).lower() != '#ff0000': continue
+        if font.get('size', '') != '3': continue
         b = font.find('b')
         if not b: continue
         label = b.get_text(strip=True).rstrip(':').strip()
@@ -7661,18 +8700,6 @@ def _pick_prof_skill_icon(name, fallback):
 
 
 # ── Build PARTS.DAT weapon → item index for the proficiency `appliedto[]` ────
-def _index_weapons_by_name(parts):
-    """Return {base_name_lower: [(item_id, name)]} keyed by stripped name (no +N)."""
-    idx = {}
-    for p in parts:
-        if not p.get('damage_type'): continue
-        if p.get('is_armor'): continue
-        base = re.sub(r'\s*[+\-]\d+.*$', '', p.get('name','')).strip().lower()
-        if not base: continue
-        idx.setdefault(base, []).append(p)
-    return idx
-
-
 # ── Factories ────────────────────────────────────────────────────────────────
 def make_weapon_proficiency_item(weapon, img, applied_part_ids):
     """Build a Foundry proficiency item from one PHB Table 44 row, with
@@ -8136,6 +9163,57 @@ def make_treasure_table(table, table_id, table_uuids, item_uuids):
     return doc, results
 
 
+# ─── Kit benefit / hindrance ability extraction ───────────────────────────────
+#
+# Each character kit has at least a "Special Benefits:" and/or "Special
+# Hindrances:" section. These are extracted as Ability sub-items and added to
+# the kit's system.itemList so the abilities appear on the actor sheet.
+#
+# The section labels are the same parse anchors already used in _KIT_LABEL_RE
+# (generic English field names, no copyrighted content). The HTML text is read
+# from the user's handbook HTM file or, for unmatched kits, the DAT prose.
+
+_KIT_ABILITY_SECTION_RE = re.compile(
+    r'^(Special Benefits?|Special Hindrances?|Benefits?(?:/Hindrances?)?|Hindrances?)',
+    re.I
+)
+
+
+def _extract_kit_ability_sections(html):
+    """Return [(label, html_block), ...] for benefit/hindrance <p> sections in a
+    kit description HTML. The label is the section heading text (without colon).
+    Works for both HTM-sourced (plain-text labels inside <p>) and DAT-sourced
+    (<strong>-wrapped labels) descriptions."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    seen = set()
+    for p in soup.find_all('p'):
+        p_text = p.get_text(strip=True)
+        m = _KIT_ABILITY_SECTION_RE.match(p_text)
+        if not m:
+            continue
+        label = m.group(1).strip()
+        key   = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append((label, str(p)))
+    return results
+
+
+def _kit_ability_icon(label):
+    """Return a verified webp icon for a kit benefit or hindrance ability."""
+    low = label.lower()
+    if 'hindrance' in low:
+        return 'icons/skills/wounds/injury-triple-slash-bleed.webp'
+    if 'benefit' in low:
+        return 'icons/skills/social/diplomacy-peace-alliance.webp'
+    # Combined benefits/hindrances
+    return 'icons/skills/social/diplomacy-handshake.webp'
+
+
 def migrate_kits():
     """Emit AD&D 2e character kits (PARTS.DAT `CPartKitOb`) as ARS `background`
     items in the adnd2-backgrounds pack, foldered by class. Each kit is matched to
@@ -8162,6 +9240,18 @@ def migrate_kits():
     for i, c in enumerate(CLASSES, 1):
         folders[c] = make_compendium_folder(make_id(), f'{c} Kits', 'Item', sort=i * 1000)
         db.put(f'!folders!{folders[c]["_id"]}'.encode(), json.dumps(folders[c]).encode())
+
+    # ── Ability folders: "Kit Abilities" root + one sub-folder per class ──────
+    ab_root_id = make_id()
+    ab_root    = make_compendium_folder(ab_root_id, 'Kit Abilities', 'Item', sort=10000)
+    db.put(f'!folders!{ab_root_id}'.encode(), json.dumps(ab_root).encode())
+    ab_folders = {}   # cls → folder_id
+    for i, c in enumerate(CLASSES, 1):
+        fid = make_id()
+        f   = make_compendium_folder(fid, f'{c} Kit Abilities', 'Item',
+                                     sort=i * 1000, parent=ab_root_id)
+        db.put(f'!folders!{fid}'.encode(), json.dumps(f).encode())
+        ab_folders[c] = fid
 
     # Link map: name → (id, name, img, pack-key, type) read back from the skills and
     # weapon-proficiency packs (written earlier in the run). Keyed by _kit_prof_norm
@@ -8190,7 +9280,7 @@ def migrate_kits():
                               if os.path.isdir(d) else {})
         return srcfiles[book]
 
-    count = matched_n = linked = 0
+    count = matched_n = linked = abilities_written = 0
     for kit in kits:
         page = _match_kit_page(kit['name'])
         if page:
@@ -8224,12 +9314,34 @@ def migrate_kits():
             })
             linked += 1
 
+        # ── Benefit / Hindrance ability items ────────────────────────────────
+        # Source: full HTM description (matched kits) or DAT-formatted prose (else)
+        source_html = desc if desc else _kit_description_html(kit.get('text', ''))
+        ab_folder_id = ab_folders.get(cls if cls in ab_folders else 'General')
+        for label, para_html in _extract_kit_ability_sections(source_html):
+            ab_name = f'{kit["name"]} — {label}'   # em-dash separator
+            icon    = _kit_ability_icon(label)
+            ab, _ef = make_ability_item(ab_name, icon, description=para_html)
+            ab['folder'] = ab_folder_id
+            db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
+            item['system']['itemList'].append({
+                'id':       ab['_id'],
+                'uuid':     f'Item.{ab["_id"]}',
+                'sourceuuid': kit_uuid,
+                'type':     'ability',
+                'name':     ab_name,
+                'img':      icon,
+                'level':    '0',
+            })
+            abilities_written += 1
+
         item['folder'] = folders[cls if cls in folders else 'General']['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
     db.close()
     print(f"  → {count} background kits ({matched_n} matched to handbook HTM, "
-          f"{linked} mandatory bonus-proficiency links)")
+          f"{linked} mandatory bonus-proficiency links, "
+          f"{abilities_written} benefit/hindrance abilities)")
     return count
 
 
@@ -8313,7 +9425,8 @@ def write_module_json(stats):
                        "Built from the user's local AD&D 2e Core Rules CD-ROM.</p>",
         "version": SYSTEM_VERSION,
         "compatibility": {"minimum": "14", "verified": "14"},
-        "authors": [{"name": "AD&D 2e Compendium Project", "flags": {}}],
+        "authors": [{"name": "Hawkwood", "flags": {}},
+                    {"name": "Claude Code", "flags": {}}],
         "relationships": {"systems": [{"id": "ars", "type": "system"}]},
         "packs": packs,
     }
@@ -8450,13 +9563,14 @@ def main():
         print(f"{'='*60}")
         try:
             phase3_stats['races']         = migrate_races()
-            phase3_stats['classes']       = migrate_classes()
             phase3_stats['spells']        = migrate_spells()
             phase3_stats['powers']        = migrate_psionics()
             phase3_stats['items']         = migrate_items()
             phase3_stats['monsters']      = migrate_monsters()
             phase3_stats['proficiencies'] = migrate_proficiencies()
             phase3_stats['skills']        = migrate_skills()
+            # classes runs after skills so it can link thieving skills cross-pack
+            phase3_stats['classes']       = migrate_classes()
             phase3_stats['backgrounds']   = migrate_kits()
             phase3_stats['treasure']      = migrate_treasure()
         except Exception as e:
