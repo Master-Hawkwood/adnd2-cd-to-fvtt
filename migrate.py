@@ -5676,13 +5676,43 @@ def _make_spell_action_groups(name, save_type, damage_formula,
 
 
 def _parse_spell_components(raw):
-    """Parse SPELLS.DAT components string ('V', 'V, S', 'V, S, M', etc.)
-    into the ARS bool dict {verbal, somatic, material}. Per ARSItemSpell
-    schema (and confirmed against osric-compendium 2026.05.20), keys are
-    spelled out — NOT the V/S/M shorthand used by older drafts."""
+    """Parse a V/S/M components string into the ARS bool dict {verbal, somatic, material}.
+    Returns all-False when raw is absent or contains non-component text."""
     if not raw: return {'verbal': False, 'somatic': False, 'material': False}
     toks = {t.strip().upper() for t in re.split(r'[,\s/]+', raw) if t.strip()}
     return {'verbal': 'V' in toks, 'somatic': 'S' in toks, 'material': 'M' in toks}
+
+
+def _resolve_spell_components(dat_raw, description_html):
+    """Pick the best V/S/M source: DAT field if it yields any component, otherwise
+    parse the 'Components:' row from the spell's HTML stat-block table. The DAT
+    field is sometimes misaligned (contains duration or range instead of components)
+    so the HTML is the authoritative fallback."""
+    result = _parse_spell_components(dat_raw)
+    if result['verbal'] or result['somatic'] or result['material']:
+        return result   # DAT gave a clean V/S/M string
+    # DAT was empty or contained non-component text — try the HTML stat block
+    html_raw = _spell_components_from_html(description_html)
+    if html_raw:
+        return _parse_spell_components(html_raw)
+    return result   # all-False (no source found)
+
+
+def _spell_components_from_html(description_html):
+    """Extract V/S/M components from a spell's stat-block table in its description HTML.
+    Looks for 'Components: V, S, M' in the right column of the 2-column stat block.
+    Returns '' when not found."""
+    if not description_html:
+        return ''
+    soup = BeautifulSoup(description_html, 'html.parser')
+    for tbl in soup.find_all('table'):
+        for row in tbl.find_all('tr'):
+            cells = [td.get_text(' ', strip=True) for td in row.find_all('td')]
+            for cell in cells:
+                m = re.match(r'Components?\s*:\s*(.+)', cell, re.I)
+                if m:
+                    return m.group(1).strip()
+    return ''
 
 
 def make_spell_item(spell, desc_override_rel=None):
@@ -5730,7 +5760,8 @@ def make_spell_item(spell, desc_override_rel=None):
             "school":       school,
             "sphere":       sphere,
             "range":        spell.get('range', ''),
-            "components":   _parse_spell_components(spell.get('components','')),
+            "components":   _resolve_spell_components(
+                                spell.get('components', ''), description),
             "durationText": spell.get('duration', ''),
             "castingTime":  spell.get('casting_time', ''),
             "areaOfEffect": spell.get('area_of_effect', ''),
