@@ -9208,6 +9208,57 @@ def make_treasure_table(table, table_id, table_uuids, item_uuids):
     return doc, results
 
 
+# ─── Kit benefit / hindrance ability extraction ───────────────────────────────
+#
+# Each character kit has at least a "Special Benefits:" and/or "Special
+# Hindrances:" section. These are extracted as Ability sub-items and added to
+# the kit's system.itemList so the abilities appear on the actor sheet.
+#
+# The section labels are the same parse anchors already used in _KIT_LABEL_RE
+# (generic English field names, no copyrighted content). The HTML text is read
+# from the user's handbook HTM file or, for unmatched kits, the DAT prose.
+
+_KIT_ABILITY_SECTION_RE = re.compile(
+    r'^(Special Benefits?|Special Hindrances?|Benefits?(?:/Hindrances?)?|Hindrances?)',
+    re.I
+)
+
+
+def _extract_kit_ability_sections(html):
+    """Return [(label, html_block), ...] for benefit/hindrance <p> sections in a
+    kit description HTML. The label is the section heading text (without colon).
+    Works for both HTM-sourced (plain-text labels inside <p>) and DAT-sourced
+    (<strong>-wrapped labels) descriptions."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    seen = set()
+    for p in soup.find_all('p'):
+        p_text = p.get_text(strip=True)
+        m = _KIT_ABILITY_SECTION_RE.match(p_text)
+        if not m:
+            continue
+        label = m.group(1).strip()
+        key   = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append((label, str(p)))
+    return results
+
+
+def _kit_ability_icon(label):
+    """Return a verified webp icon for a kit benefit or hindrance ability."""
+    low = label.lower()
+    if 'hindrance' in low:
+        return 'icons/skills/wounds/injury-triple-slash-bleed.webp'
+    if 'benefit' in low:
+        return 'icons/skills/social/diplomacy-peace-alliance.webp'
+    # Combined benefits/hindrances
+    return 'icons/skills/social/diplomacy-handshake.webp'
+
+
 def migrate_kits():
     """Emit AD&D 2e character kits (PARTS.DAT `CPartKitOb`) as ARS `background`
     items in the adnd2-backgrounds pack, foldered by class. Each kit is matched to
@@ -9234,6 +9285,18 @@ def migrate_kits():
     for i, c in enumerate(CLASSES, 1):
         folders[c] = make_compendium_folder(make_id(), f'{c} Kits', 'Item', sort=i * 1000)
         db.put(f'!folders!{folders[c]["_id"]}'.encode(), json.dumps(folders[c]).encode())
+
+    # ── Ability folders: "Kit Abilities" root + one sub-folder per class ──────
+    ab_root_id = make_id()
+    ab_root    = make_compendium_folder(ab_root_id, 'Kit Abilities', 'Item', sort=10000)
+    db.put(f'!folders!{ab_root_id}'.encode(), json.dumps(ab_root).encode())
+    ab_folders = {}   # cls → folder_id
+    for i, c in enumerate(CLASSES, 1):
+        fid = make_id()
+        f   = make_compendium_folder(fid, f'{c} Kit Abilities', 'Item',
+                                     sort=i * 1000, parent=ab_root_id)
+        db.put(f'!folders!{fid}'.encode(), json.dumps(f).encode())
+        ab_folders[c] = fid
 
     # Link map: name → (id, name, img, pack-key, type) read back from the skills and
     # weapon-proficiency packs (written earlier in the run). Keyed by _kit_prof_norm
@@ -9262,7 +9325,7 @@ def migrate_kits():
                               if os.path.isdir(d) else {})
         return srcfiles[book]
 
-    count = matched_n = linked = 0
+    count = matched_n = linked = abilities_written = 0
     for kit in kits:
         page = _match_kit_page(kit['name'])
         if page:
@@ -9296,12 +9359,34 @@ def migrate_kits():
             })
             linked += 1
 
+        # ── Benefit / Hindrance ability items ────────────────────────────────
+        # Source: full HTM description (matched kits) or DAT-formatted prose (else)
+        source_html = desc if desc else _kit_description_html(kit.get('text', ''))
+        ab_folder_id = ab_folders.get(cls if cls in ab_folders else 'General')
+        for label, para_html in _extract_kit_ability_sections(source_html):
+            ab_name = f'{kit["name"]} — {label}'   # em-dash separator
+            icon    = _kit_ability_icon(label)
+            ab, _ef = make_ability_item(ab_name, icon, description=para_html)
+            ab['folder'] = ab_folder_id
+            db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
+            item['system']['itemList'].append({
+                'id':       ab['_id'],
+                'uuid':     f'Item.{ab["_id"]}',
+                'sourceuuid': kit_uuid,
+                'type':     'ability',
+                'name':     ab_name,
+                'img':      icon,
+                'level':    '0',
+            })
+            abilities_written += 1
+
         item['folder'] = folders[cls if cls in folders else 'General']['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
     db.close()
     print(f"  → {count} background kits ({matched_n} matched to handbook HTM, "
-          f"{linked} mandatory bonus-proficiency links)")
+          f"{linked} mandatory bonus-proficiency links, "
+          f"{abilities_written} benefit/hindrance abilities)")
     return count
 
 
