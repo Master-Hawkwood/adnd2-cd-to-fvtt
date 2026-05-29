@@ -2714,18 +2714,19 @@ def _ability_actions(raw_name):
             ('Know Alignment',  'none'),
         ]
         return [_make_action_group('Elven Spell Abilities', _FOUNDRY_ICON_DEFAULT, [
-            _make_action(nm, type_='cast', save_type=save, charges_per_day=1)
+            _make_action(nm, type_='cast', img=_FOUNDRY_ICON_DEFAULT,
+                         save_type=save, charges_per_day=1)
             for nm, save in ELF_SPELLS
         ])]
 
     # ── Paralyzing Bite (Thri-kreen): melee attack → damage → save vs paralysis
     if low == 'paralyzing bite':
         return [_make_action_group('Paralyzing Bite', _FOUNDRY_ICON_DEFAULT, [
-            _make_action('Bite Attack', type_='melee', targeting='single',
-                         speed=4),
-            _make_action('Damage', type_='damage', targeting='single',
-                         formula='1d4', damage_type='piercing'),
-            _make_action('Paralysis Save', type_='effect',
+            _make_action('Bite Attack', type_='melee', img=_FOUNDRY_ICON_DEFAULT,
+                         targeting='single', speed=4),
+            _make_action('Damage', type_='damage', img=_FOUNDRY_ICON_DEFAULT,
+                         targeting='single', formula='1d4', damage_type='piercing'),
+            _make_action('Paralysis Save', type_='effect', img=_FOUNDRY_ICON_DEFAULT,
                          targeting='single', save_type='paralyzation',
                          effect_changes=[{
                              'key':'special.status', 'type':'custom',
@@ -2737,15 +2738,17 @@ def _ability_actions(raw_name):
     if low == 'charge attack':
         return [_make_action_group('Charge Attack', _FOUNDRY_ICON_DEFAULT, [
             _make_action('Charge (move + attack)', type_='melee',
-                         targeting='single', speed=0),
+                         img=_FOUNDRY_ICON_DEFAULT, targeting='single', speed=0),
             _make_action('Charge Damage', type_='damage',
-                         targeting='single', formula='2', damage_type=''),
+                         img=_FOUNDRY_ICON_DEFAULT, targeting='single',
+                         formula='2', damage_type=''),
         ])]
 
     # ── Leap (Thri-kreen / others): single-use movement burst
     if low == 'leap':
         return [_make_action_group('Leap', _FOUNDRY_ICON_DEFAULT, [
-            _make_action('Leap', type_='cast', targeting='self'),
+            _make_action('Leap', type_='cast', img=_FOUNDRY_ICON_DEFAULT,
+                         targeting='self'),
         ])]
 
     # ── Determine Stability / Determine Age / Detect new construction /
