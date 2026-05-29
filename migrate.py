@@ -5701,8 +5701,9 @@ def make_spell_item(spell, desc_override_rel=None):
     }
 
 
-def make_power_item(power):
+def make_power_item(power, description=''):
     """Build an ARS `power` Item (psionic power) from a parsed PSIONIC.DAT record.
+    `description` is either S&P HTML (preferred) or plain DAT text (fallback).
     See the schema note below and CLAUDE.md."""
     item_id = make_id()
     # ARSItemPower schema: range / areaOfEffect / prerequisites (note the
@@ -5710,13 +5711,16 @@ def make_power_item(power):
     # not under system.attributes. The legacy 'power_score' field maps to
     # 'abilityMod' (the modifier applied to the d20 roll-under check).
     disc_idx = power.get('discipline', -1)
+    # Plain-text DAT descriptions use CR/LF; convert to spaces for HTML storage.
+    if description and '<' not in description:
+        description = re.sub(r'[\r\n]+', ' ', description).strip()
     return {
         "_id": item_id,
         "name": power['name'],
         "type": "power",
         "img": _power_icon(power['name']),
         "system": {
-            "description":   re.sub(r'[\r\n]+', ' ', power.get('description', '')).strip(),
+            "description":   description,
             "discipline":    _DISC_NAMES.get(disc_idx, ''),
             "range":         power.get('range', ''),
             "areaOfEffect":  power.get('area_of_effect', '') or 'personal',
@@ -6771,6 +6775,56 @@ def migrate_races():
         print(f"  ({no_desc} races without HTML description)")
     return n_races
 
+# ─── S&P psionic-power and Psionicist-class HTML index ────────────────────────
+# SP individual power pages follow the title pattern:
+#   "{Name}-- {Discipline} Power (Skills & Powers)"
+# The Psionicist class page is:
+#   "Psionicist-- Character Class (Skills & Powers)"
+# We extract the name before the first " --" and use it as the lookup key.
+
+_sp_psionic_cache = None
+
+
+def _build_sp_psionic_index():
+    """Build {name_lower → clean_html} for S&P psionic power + Psionicist class pages.
+    Scans all SP*.HTM files; selects those whose <TITLE> ends with 'Power (Skills &
+    Powers)' or 'Character Class (Skills & Powers)'. Returns '' values for empty pages."""
+    global _sp_psionic_cache
+    if _sp_psionic_cache is not None:
+        return _sp_psionic_cache
+    book_dir = os.path.join(SOURCE_BASE, 'SP')
+    index = {}
+    if not os.path.isdir(book_dir):
+        _sp_psionic_cache = index
+        return index
+    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    for fn in sorted(os.listdir(book_dir)):
+        if not (fn.upper().startswith('SP') and fn.upper().endswith('.HTM')):
+            continue
+        path = os.path.join(book_dir, fn)
+        try:
+            with open(path, encoding='cp1252') as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        if '<TITLE>' not in content:
+            continue
+        raw_title = content.split('<TITLE>')[1].split('</TITLE>')[0].strip()
+        # Match power or class pages
+        if not (raw_title.endswith('Power (Skills & Powers)') or
+                raw_title.endswith('Character Class (Skills & Powers)')):
+            continue
+        # Extract the name: everything before the first "--"
+        name_part = raw_title.split('--')[0].strip()
+        key = name_part.lower()
+        if key in index:
+            continue
+        html = clean_html_file(path, 'SP', src_dir_files)
+        if html.strip():
+            index[key] = html
+    _sp_psionic_cache = index
+    return index
+
 
 _phb_class_desc_cache = None
 
@@ -6832,10 +6886,15 @@ def _build_phb_class_desc_index():
 
 
 def _get_class_desc(cls_name, group, class_descs):
-    """Look up a cleaned PHB class description for a CLASS.DAT class. Tries the
-    class name directly, then group-level fallbacks for specialist wizards and
-    other shared-section cases. Returns '' when nothing matches."""
+    """Look up a class description from PHB chapter 3 HTML (class_descs), with a
+    S&P fallback for the Psionicist (not in PHB). Also tries group-level fallbacks
+    for specialist wizards and generic priest sub-classes. Returns '' when nothing
+    matches."""
     key = cls_name.lower()
+    # Psionicist: not in PHB — source from S&P "Psionicist-- Character Class" page
+    if group == 'psionicist' or key == 'psionicist':
+        sp_index = _build_sp_psionic_index()
+        return sp_index.get('psionicist', '')
     if key in class_descs:
         return class_descs[key]
     # Specialist wizard sub-classes share the "Specialist Wizards" PHB section
@@ -7034,19 +7093,37 @@ def migrate_spells():
 
 def migrate_psionics():
     """Phase 3: write the powers pack — a `power` Item per PSIONIC.DAT record.
+    Description priority: S&P HTML (richer, formatted) > DAT plain text > ''.
     Returns count."""
     print("\n=== Psionic Powers (PSIONIC.DAT) ===")
     powers = parse_psionics()
     if not powers:
         print("  No powers parsed."); return 0
+    sp_index = _build_sp_psionic_index()
+    print(f"  S&P power pages indexed: {len(sp_index)}")
     db = _open_pack(OUTPUT_PACKS['powers'])
+    sp_hits = 0
+    dat_hits = 0
+    no_desc  = 0
     count = 0
     for power in powers:
-        item = make_power_item(power)
+        name_key = power['name'].lower()
+        sp_html  = sp_index.get(name_key, '')
+        dat_text = power.get('description', '')
+        if sp_html:
+            desc = sp_html
+            sp_hits += 1
+        elif dat_text:
+            desc = dat_text
+            dat_hits += 1
+        else:
+            desc = ''
+            no_desc += 1
+        item = make_power_item(power, description=desc)
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         count += 1
     db.close()
-    print(f"  → {count} psionic powers written to {OUTPUT_PACKS['powers']}")
+    print(f"  → {count} powers  (S&P HTML: {sp_hits}, DAT text: {dat_hits}, none: {no_desc})")
     return count
 
 
