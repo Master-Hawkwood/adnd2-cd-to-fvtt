@@ -5844,7 +5844,7 @@ def _natural_attack_formulas(damage_str):
     is an attack roll only — we never fabricate a damage value."""
     if not damage_str:
         return []
-    main = re.split(r'\bor\b', damage_str, 1)[0]
+    main = re.split(r'\bor\b', damage_str, maxsplit=1)[0]
     out = []
     for comp in main.split('/'):
         core = re.sub(r'\s*\(.*$', '', comp).strip()
