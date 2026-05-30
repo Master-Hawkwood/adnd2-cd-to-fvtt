@@ -985,6 +985,10 @@ def parse_class_record(buf, start, end):
     if xp_offset is not None:
         # Proficiency fields at fixed int32 indices from p_data (see _rel above)
         if _rel + 29*4 + 4 <= xp_offset:
+            # Rogue skill-point budget: [18]=starting points (level 1), [19]=per-level gain.
+            # Non-rogue classes have 0 here. Validated: Thief=60/30, Bard=20/15, others=0/0.
+            r['skill_pts_start'] = struct.unpack_from('<i', chunk, _rel + 18*4)[0]
+            r['skill_pts_level'] = struct.unpack_from('<i', chunk, _rel + 19*4)[0]
             r['nwp_starting']  = struct.unpack_from('<i', chunk, _rel + 23*4)[0]
             r['nwp_gain_level']= struct.unpack_from('<i', chunk, _rel + 24*4)[0]
             r['wp_starting']   = struct.unpack_from('<i', chunk, _rel + 27*4)[0]
@@ -4448,9 +4452,11 @@ def _build_class_ranks(cls):
     Capped at level 20 (standard 2e advancement-table length). Saves are read
     from the CLASS.DAT save_table (5 columns → 10 ARS keys via _SAVE_COL_MAP);
     spell slots and BAB default to neutral schema values."""
-    xp_table    = cls.get('xp_table',    []) or []
-    thaco_table = cls.get('thaco_table', []) or []
-    save_table  = list(cls.get('save_table', []) or [])
+    xp_table       = cls.get('xp_table',    []) or []
+    thaco_table    = cls.get('thaco_table', []) or []
+    save_table     = list(cls.get('save_table', []) or [])
+    skill_pts_start = cls.get('skill_pts_start', 0) or 0
+    skill_pts_level = cls.get('skill_pts_level', 0) or 0
     hit_die     = cls.get('hit_die')
     # Warriors (Fighter/Paladin/Ranger) have save_table[1]=L1 saves directly.
     # All other classes scan lands one row early (the Normal Man signature
@@ -4486,7 +4492,7 @@ def _build_class_ranks(cls):
             "hdformula":     hdformula,
             "baseMove":      None,
             "baseAC":        None,
-            "classpoints":   None,
+            "classpoints":   (skill_pts_start if level == 1 else skill_pts_level) if (skill_pts_start or skill_pts_level) else None,
             "title":         "",
             "paralyzation": par, "poison": par, "death": par,
             "rod": rod, "staff": rod, "wand": rod,
