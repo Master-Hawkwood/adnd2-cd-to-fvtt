@@ -4443,14 +4443,21 @@ _CLASS_MAX_RANKS = 20   # 2e PHB Table 14 stops at level 20; beyond-20 is a
 
 
 def _build_class_ranks(cls):
-    """Emit the ARSClassRank list from CLASS.DAT-extracted xp/thaco tables.
-    Capped at level 20 (standard 2e advancement-table length). Only fields
-    CLASS.DAT actually carries are populated; saves, spell slots, BAB,
-    attacks-per-round, psionics, caster level default to the schema's
-    neutral initial values."""
+    """Emit the ARSClassRank list from CLASS.DAT-extracted xp/thaco/save tables.
+    Capped at level 20 (standard 2e advancement-table length). Saves are read
+    from the CLASS.DAT save_table (5 columns → 10 ARS keys via _SAVE_COL_MAP);
+    spell slots and BAB default to neutral schema values."""
     xp_table    = cls.get('xp_table',    []) or []
     thaco_table = cls.get('thaco_table', []) or []
+    save_table  = list(cls.get('save_table', []) or [])
     hit_die     = cls.get('hit_die')
+    # Warriors (Fighter/Paladin/Ranger) have save_table[1]=L1 saves directly.
+    # All other classes scan lands one row early (the Normal Man signature
+    # [16,18,17,20,19] appears twice at the start of their record), making
+    # save_table[1] still Normal Man and L1 saves at save_table[2].
+    # Detect by identical first two rows and strip the extra header.
+    if len(save_table) > 2 and save_table[0] == save_table[1]:
+        save_table = save_table[1:]
     real_n = min(_CLASS_MAX_RANKS, max(len(xp_table), len(thaco_table)))
     if real_n == 0:
         return []
@@ -4461,6 +4468,13 @@ def _build_class_ranks(cls):
         # features.lasthitdice). We still emit the rank with the same
         # hdformula since OSRIC does (the engine drops the HD roll itself).
         hdformula = f"d{hit_die}" if hit_die else "1d6"
+        # Saves: save_table[0]=Normal Man, save_table[L]=class level L.
+        # Columns: [par/poi/death, rod/staff/wand, pet/poly, breath, spell].
+        if save_table and level < len(save_table):
+            row = save_table[level]
+            par, rod, pet, bre, spl = row[0], row[1], row[2], row[3], row[4]
+        else:
+            par = rod = pet = bre = spl = 20
         ranks.append({
             "level":         level,
             "thaco":         thaco_table[i] if i < len(thaco_table) else 20,
@@ -4471,14 +4485,13 @@ def _build_class_ranks(cls):
             "hdformula":     hdformula,
             "baseMove":      None,
             "baseAC":        None,
-            "classpoints":   0,
+            "classpoints":   None,
             "title":         "",
-            # Saves default to 20 (always-fail) — CLASS.DAT doesn't ship
-            # per-level saving-throw tables in our decoded subset.
-            "paralyzation": 20, "poison": 20, "death": 20, "rod": 20, "staff": 20,
-            "wand": 20, "petrification": 20, "polymorph": 20, "breath": 20, "spell": 20,
-            # Spell-slot arrays default to all-zero. CLASS.DAT doesn't ship
-            # them in our decoded subset; populate later if extracted.
+            "paralyzation": par, "poison": par, "death": par,
+            "rod": rod, "staff": rod, "wand": rod,
+            "petrification": pet, "polymorph": pet,
+            "breath": bre,
+            "spell": spl,
             "arcane": [0]*10,
             "divine": [0]*8,
             "psionic": {"disciplines": 0, "sciences": 0, "devotions": 0,
@@ -6480,8 +6493,13 @@ def _finalize_with_fvtt_cli():
         if os.path.exists(existing):
             shutil.rmtree(existing)
 
-        # --out = parent dir; fvtt-cli writes to parent/pack_name/
-        cmd    = [_FVTT_CLI_CMD, 'package', 'pack', '-n', pack_name, '--in', src, '--out', packs_dir]
+        # --out = parent dir; fvtt-cli writes to parent/pack_name/.
+        # Use abspath so fvtt-cli (Node.js) receives OS-native absolute paths;
+        # on Windows this avoids forward slashes being misread as cmd.exe flags.
+        src_abs  = os.path.abspath(src)
+        packs_abs = os.path.abspath(packs_dir)
+        cmd    = [_FVTT_CLI_CMD, 'package', 'pack', '-n', pack_name,
+                  '--in', src_abs, '--out', packs_abs]
         # On Windows npm-global commands are .cmd files and require shell=True to be
         # found by CreateProcess. encoding= avoids cp1252 decoding errors on non-ASCII output.
         result = subprocess.run(cmd, capture_output=True, text=True,
