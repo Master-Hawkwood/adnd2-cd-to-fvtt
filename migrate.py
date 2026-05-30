@@ -67,8 +67,9 @@ from PIL import Image
 
 # fvtt-cli integration (migrate2.py — plyvel-free variant)
 # Install fvtt-cli globally: npm install -g @foundryvtt/foundryvtt-cli
-# Change to 'npx @foundryvtt/foundryvtt-cli' if 'fvtt' is not on PATH.
-_FVTT_CLI_CMD  = 'fvtt'
+# If 'fvtt' is not on PATH, use the list form for npx:
+#   _FVTT_CLI_CMD = ['npx', '@foundryvtt/foundryvtt-cli']
+_FVTT_CLI_CMD: "str | list[str]" = 'fvtt'
 # Intermediate JSON staging directory (deleted after packing).
 _PACK_SRC_BASE = "adnd2-compendium-src"
 
@@ -6496,10 +6497,12 @@ def _finalize_with_fvtt_cli():
         # --out = parent dir; fvtt-cli writes to parent/pack_name/.
         # Use abspath so fvtt-cli (Node.js) receives OS-native absolute paths;
         # on Windows this avoids forward slashes being misread as cmd.exe flags.
-        src_abs  = os.path.abspath(src)
+        src_abs   = os.path.abspath(src)
         packs_abs = os.path.abspath(packs_dir)
-        cmd    = [_FVTT_CLI_CMD, 'package', 'pack', '-n', pack_name,
-                  '--in', src_abs, '--out', packs_abs]
+        # _FVTT_CLI_CMD may be a string ('fvtt') or a list (['npx', '@foundryvtt/foundryvtt-cli'])
+        cli = _FVTT_CLI_CMD if isinstance(_FVTT_CLI_CMD, list) else [_FVTT_CLI_CMD]
+        cmd = cli + ['package', 'pack', '-n', pack_name,
+                     '--in', src_abs, '--out', packs_abs]
         # On Windows npm-global commands are .cmd files and require shell=True to be
         # found by CreateProcess. encoding= avoids cp1252 decoding errors on non-ASCII output.
         result = subprocess.run(cmd, capture_output=True, text=True,
