@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AD&D 2e CD-ROM to Foundry VTT — project-specific exclusions
+# CD-ROM content (copyrighted, not redistributed)
+cd-rom/
+# Generated output (local build artifact)
+adnd2-compendium/
+# ARS system symlink (read-only reference, not redistributed)
