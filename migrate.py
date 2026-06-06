@@ -148,7 +148,7 @@ FOLDERS = [
 
 CORE_VERSION   = "14.363"
 SYSTEM_ID      = "ars"
-SYSTEM_VERSION = "2026.05.25"
+SYSTEM_VERSION = "2026.05.31"
 
 # ─── ID generation ────────────────────────────────────────────────────────────
 
@@ -2780,7 +2780,9 @@ def _ability_effect_changes(raw_name):
     if low in ('defensive bonus','tough hide','dense skin'):
                                          return _add('system.mods.ac.value', -1)
     if low == 'magic resistance':        return _add('system.mods.magic.resist', 10)
-    if low == 'experience bonus':        return _add('system.mods.formula.xp', '@rank.levels.max*0.10')
+    # 'Experience bonus' has no stock ARS change key (system.xpbonus lives on
+    # the class item itself, set when owned — not an actor-level effect path);
+    # fall through to descriptive-only.
 
     # ── Save bonuses (descending tags: properties filter the save trigger) ──
     if low == 'cold resistance':         return _save('cold')
@@ -4457,7 +4459,9 @@ def _build_class_ranks(cls):
     save_table     = list(cls.get('save_table', []) or [])
     skill_pts_start = cls.get('skill_pts_start', 0) or 0
     skill_pts_level = cls.get('skill_pts_level', 0) or 0
-    hit_die     = cls.get('hit_die')
+    hit_die       = cls.get('hit_die')
+    hit_dice_cap  = cls.get('hit_dice_cap')  or 0
+    hp_after_cap  = cls.get('hp_after_cap')  or 0
     # Warriors (Fighter/Paladin/Ranger) have save_table[1]=L1 saves directly.
     # All other classes scan lands one row early (the Normal Man signature
     # [16,18,17,20,19] appears twice at the start of their record), making
@@ -4471,10 +4475,16 @@ def _build_class_ranks(cls):
     ranks = []
     for i in range(real_n):
         level = i + 1
-        # After hit_dice_cap, HD rolls stop (flat HP per level via
-        # features.lasthitdice). We still emit the rank with the same
-        # hdformula since OSRIC does (the engine drops the HD roll itself).
-        hdformula = f"d{hit_die}" if hit_die else "1d6"
+        # 2e rule: HD are rolled through `hit_dice_cap`; beyond that the class
+        # gains a flat number of hit points per level instead of another HD
+        # (both values read from CLASS.DAT). The engine does NOT switch this
+        # automatically — it just rolls whatever `hdformula` string we give it
+        # — so post-cap ranks must carry the flat number as a literal string.
+        # Mirrors OSRIC's Fighter: "d10" through level 9, then "3" from 10 on.
+        if hit_dice_cap and level > hit_dice_cap and hp_after_cap:
+            hdformula = str(hp_after_cap)
+        else:
+            hdformula = f"d{hit_die}" if hit_die else "1d6"
         # Saves: save_table[0]=Normal Man, save_table[L]=class level L.
         # Columns: [par/poi/death, rod/staff/wand, pet/poly, breath, spell].
         if save_table and level < len(save_table):
@@ -4484,7 +4494,10 @@ def _build_class_ranks(cls):
             par = rod = pet = bre = spl = 20
         ranks.append({
             "level":         level,
-            "thaco":         thaco_table[i] if i < len(thaco_table) else 20,
+            # thaco_table[0] is a "Normal Man" / level-0 baseline entry — same
+            # leading-row quirk as save_table (compare the comment above).
+            # Per-class-level THAC0 starts at index `level`, not `level - 1`.
+            "thaco":         thaco_table[level] if level < len(thaco_table) else 20,
             "bab":           0,
             "numatks":       "1/1",
             "turnLevel":     0,
@@ -7747,6 +7760,36 @@ def _cleric_turn_undead_block(html):
     return None
 
 
+def _class_followers_block(html):
+    """Extract the paragraph(s) describing a class's follower-attraction
+    feature ('attracts a body of men-at-arms/believers/followers...' at
+    some level) from its PHB class description. Mirrors
+    _cleric_turn_undead_block / _thief_backstab_block: captures the
+    triggering paragraph plus immediately-following paragraphs that
+    continue the same topic (stronghold/men-at-arms/followers prose)."""
+    if not html:
+        return None
+    soup = BeautifulSoup(html, 'html.parser')
+    paras = soup.find_all('p')
+    trigger_pat = re.compile(r'attracts?\s+(?:a\s+|an\s+|\d*d?\d*\s*)?'
+                             r'(?:fanatically loyal group of |body of |elite )?'
+                             r'(?:men-at-arms|follow|believ|soldier|bodyguard)', re.I)
+    follow_pat  = re.compile(r'follow|men-at-arms|believ|soldier|stronghold|'
+                             r'castle|household|bodyguard|\bLord\b', re.I)
+    out, capture = [], False
+    for p in paras:
+        text = p.get_text()
+        if not capture and trigger_pat.search(text):
+            capture = True
+        if capture:
+            if out and not follow_pat.search(text):
+                break
+            out.append(str(p))
+            if len(out) >= 3:
+                break
+    return ''.join(out) if out else None
+
+
 def _thief_backstab_block(html):
     """Extract Backstab ability block from PHB class text or PHB00100 explanations."""
     # Try primary class description first
@@ -7801,6 +7844,56 @@ def _load_skill_link_map():
     return result
 
 
+def _load_weapon_specialization_data():
+    """Read PHB00125–127 and return cleaned HTML descriptions plus bonus
+    values and slot costs parsed from the source files at runtime."""
+    phb_dir       = os.path.join(SOURCE_BASE, 'PHB')
+    src_dir_files = {f.upper(): f for f in os.listdir(phb_dir)}
+
+    def _page(fname):
+        path = os.path.join(phb_dir, fname)
+        if not os.path.exists(path):
+            return ''
+        return clean_html_file(path, 'PHB', src_dir_files)
+
+    intro_html   = _page('PHB00125.HTM')
+    cost_html    = _page('PHB00126.HTM')
+    effects_html = _page('PHB00127.HTM')
+
+    melee_atk = melee_dmg = bow_atk = 0
+    melee_cost = bow_cost = 0
+    eff_path  = os.path.join(phb_dir, 'PHB00127.HTM')
+    cost_path = os.path.join(phb_dir, 'PHB00126.HTM')
+    if os.path.exists(eff_path):
+        with open(eff_path, encoding='latin-1') as fh:
+            eff_text = ' '.join(BeautifulSoup(fh.read(), 'html.parser').get_text(' ').split())
+        m = re.search(r'\+(\d+)\s+bonus to all his attack rolls', eff_text)
+        if m: melee_atk = int(m.group(1))
+        m = re.search(r'\+(\d+)\s+bonus to all damage rolls', eff_text)
+        if m: melee_dmg = int(m.group(1))
+        m = re.search(r'gains a \+(\d+) modifier on attack rolls', eff_text)
+        if m: bow_atk = int(m.group(1))
+    if os.path.exists(cost_path):
+        with open(cost_path, encoding='latin-1') as fh:
+            cost_text = ' '.join(BeautifulSoup(fh.read(), 'html.parser').get_text(' ').split())
+        m = re.search(r'melee weapon or crossbow.*?(\w+)\s+slots', cost_text, re.S)
+        _WORD_NUM = {'one': 1, 'two': 2, 'three': 3, 'four': 4}
+        if m: melee_cost = max(0, _WORD_NUM.get(m.group(1).lower(), 2) - 1)
+        m = re.search(r'bow.*?total of\s+(\w+)\s+proficiency slots', cost_text, re.S)
+        if m: bow_cost   = max(0, _WORD_NUM.get(m.group(1).lower(), 3) - 1)
+
+    return {
+        'full_desc':   intro_html + cost_html + effects_html,
+        'melee_desc':  effects_html,
+        'bow_desc':    effects_html,
+        'melee_atk':   melee_atk,
+        'melee_dmg':   melee_dmg,
+        'bow_atk':     bow_atk,
+        'melee_cost':  melee_cost,
+        'bow_cost':    bow_cost,
+    }
+
+
 def _class_abilities_for(cls, class_descs):
     """Return a list of ability spec dicts for a CLASS.DAT class record.
     Each spec has: name, description (HTML), effect_changes, action_groups,
@@ -7828,8 +7921,14 @@ def _class_abilities_for(cls, class_descs):
             'icon':           icon,
         })
 
+    # ── Fighter: Weapon Specialization (PHB00125–127) + Followers (9th, "Lord") ─
+    if name.lower() == 'fighter':
+        ws = _load_weapon_specialization_data()
+        _push('Weapon Specialization', ws['full_desc'])
+        _push('Followers', _class_followers_block(desc_html) or '')
+
     # ── Paladin & Ranger: <strong> bullet blocks + prose extras ──────────────
-    if name.lower() in ('paladin', 'ranger'):
+    elif name.lower() in ('paladin', 'ranger'):
         blocks = _parse_strong_ability_blocks(desc_html)
         for lead, block_html in blocks:
             ability_name = None
@@ -7862,6 +7961,8 @@ def _class_abilities_for(cls, class_descs):
                 words = re.sub(r'[,.].*', '', lead).split()[:4]
                 ability_name = ' '.join(w.capitalize() for w in words) if words else lead[:30]
             _push(ability_name, block_html, lead=lead)
+        # Followers (9th level, stronghold) — plain prose, not a <strong> bullet
+        _push('Followers', _class_followers_block(desc_html) or '')
 
     # ── Thief: Backstab ability (thieving skills themselves become skill links) ─
     elif name.lower() == 'thief':
@@ -7869,10 +7970,11 @@ def _class_abilities_for(cls, class_descs):
         if backstab_html:
             _push('Backstab', backstab_html)
 
-    # ── Cleric: Turn Undead from prose ────────────────────────────────────────
+    # ── Cleric: Turn Undead + Followers (8th level, believers) from prose ────
     elif name.lower() == 'cleric':
         turn_block = _cleric_turn_undead_block(desc_html)
         _push('Turn Undead', turn_block or '')
+        _push('Followers', _class_followers_block(desc_html) or '')
         _push('Priest Spells')
 
     # ── Druid: granted powers from PHB00088 ───────────────────────────────────
@@ -9476,16 +9578,60 @@ def migrate_proficiencies():
             matched_count += 1
         wp_items.append(item)
 
-    # ── Write everything ───────────────────────────────────────────────────
+    # ── Weapon Specialization proficiency items (Melee + Bow) ────────────────
+    # Bonuses live in the proficiency item's own built-in `hit`/`damage`
+    # fields (see OSRIC "Specialization (Missile)") — no ActiveEffect needed.
+    ws = _load_weapon_specialization_data()
+    ws_folder = make_compendium_folder(make_id(), 'Weapon Specialization',
+                                       'Item', sort=300000)
+    _WS_ICON = 'icons/weapons/swords/greatsword-crossguard-embossed-gold.webp'
+    _WS_BOW_ICON = 'icons/skills/ranged/archery-bow-attack-yellow.webp'
+    ws_specs = [
+        ('Weapon Specialization (Melee)', _WS_ICON,
+         ws['melee_desc'], ws['melee_atk'], ws['melee_dmg'], ws['melee_cost']),
+        ('Weapon Specialization (Bow)',   _WS_BOW_ICON,
+         ws['bow_desc'],   ws['bow_atk'],   0,              ws['bow_cost']),
+    ]
+    ws_items_extra = []
+    for ws_name, ws_icon, ws_desc, ws_hit, ws_dmg, ws_cost in ws_specs:
+        ws_items_extra.append({
+            '_id': make_id(), 'name': ws_name, 'type': 'proficiency', 'img': ws_icon,
+            'effects': [],
+            'system': {
+                'description': ws_desc, 'dmonlytext': '', 'itemList': [],
+                'appliedto': [], 'cost': None,
+                'hit': str(ws_hit) if ws_hit else '',
+                'damage': str(ws_dmg) if ws_dmg else '',
+                'speed': 0, 'attacks': '', 'migrate': False,
+                'attributes': {'rarity': '', 'type': '', 'subtype': '', 'magic': False,
+                               'properties': [], 'skillmods': [], 'conditionals': [],
+                               'identified': True, 'infiniteammo': False,
+                               'size': 'medium', 'material': 'leather_book'},
+                'charges':  {'value': 0, 'min': 0, 'max': 0, 'reuse': 'none'},
+                'location': {'state': '', 'parent': ''},
+                'resource': {'itemId': ''},
+                'quantity': 0, 'weight': 0, 'source': '', 'xp': 0,
+                'actions': [], 'actionGroups': [],
+                'proficiencies': {'cost': ws_cost},
+                'rank': {'levels': {'max': 1, 'arcane': 1, 'divine': 1}},
+            },
+            'folder': ws_folder['_id'], 'sort': 0,
+            'ownership': {'default': 0},
+            'flags': {}, '_stats': _stats_block(),
+        })
+
     for item in wp_items:
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
     for item in fam_items.values():
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
-    for f in (wp_folder, fam_folder):
+    for item in ws_items_extra:
+        db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+    for f in (wp_folder, fam_folder, ws_folder):
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
-    total = len(wp_items) + len(fam_items)
+    total = len(wp_items) + len(fam_items) + len(ws_items_extra)
     print(f"  → {len(wp_items)} weapon proficiencies + {len(fam_items)} group familiarities")
+    print(f"    + {len(ws_items_extra)} weapon specialization items")
     print(f"    {matched_count} weapon proficiencies link at least one familiarity")
     return total
 
