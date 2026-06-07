@@ -1644,15 +1644,25 @@ def parse_spell_record(buf, start, end):
     r = {}
     r['name'], p = read_pascal(buf, p)
     if r['name'] is None: return None
-    if r['name'] in _SCHOOL_NAMES or r['name'] in _SPHERE_NAMES:
-        return None     # embedded school/sphere reference, not a top-level spell
+    name_collides = r['name'] in _SCHOOL_NAMES or r['name'] in _SPHERE_NAMES
     # 7 zero bytes, then class type int32 @+8 and level int32 @+16 (relative to post-name)
-    if p + 20 > end: return r
+    if p + 20 > end:
+        # No spell header present: a real spell always has one, a bare embedded
+        # school/sphere reference does not — so drop a name-colliding stub here.
+        return None if name_collides else r
     try:
-        r['class_type_id'] = struct.unpack_from('<i', buf, p + 8)[0]
-        r['level']         = struct.unpack_from('<i', buf, p + 16)[0]
+        class_type_id = struct.unpack_from('<i', buf, p + 8)[0]
+        level         = struct.unpack_from('<i', buf, p + 16)[0]
     except struct.error:
-        return r
+        return None if name_collides else r
+    # A record whose name equals a school/sphere label is an embedded reference,
+    # NOT a spell — UNLESS it carries a valid spell header (level 1-9). The two
+    # real spells named "Chaos"/"Divination" do (levels 5/4); distinguish by the
+    # header, not the name (names are not unique). Fixes GitHub issue #5.
+    if name_collides and not (1 <= level <= 9):
+        return None
+    r['class_type_id'] = class_type_id
+    r['level']         = level
     r['class_type'] = 'wizard' if r['class_type_id'] == 1 else 'priest'
     # Walk Pascal strings: area, casting time, components, duration, range, save, school, +
     fields_order = ['area_of_effect', 'casting_time', 'components',
@@ -3562,8 +3572,12 @@ def _make_action_group(name, img, actions, description=''):
 
 
 def _make_effect_doc(name, img, changes, origin_uuid, transfer=True,
-                     description='', effect_id=None):
+                     description='', effect_id=None, aura=None):
     """Build a standalone ARS ActiveEffect document (subtype 'base').
+
+    `aura`, when given, is merged into the `system.aura` block (e.g.
+    {"enabled": True, "distance": 5}) — used for radius effects whose changes
+    carry the `aura.`-prefixed keys ARS strips into a region-transferred effect.
 
     CRITICAL: ARS reads effect changes from `system.changes`, NOT Foundry's
     core top-level `changes` field — confirmed both in the ARS source
@@ -3600,7 +3614,7 @@ def _make_effect_doc(name, img, changes, origin_uuid, transfer=True,
                      "disposition": "friendly", "permission": "all",
                      "color": "#ff0000", "opacity": 0.35,
                      "includeSource": False, "isAura": False,
-                     "originUuid": "", "effectUuid": ""},
+                     "originUuid": "", "effectUuid": "", **(aura or {})},
         },
         "sort": 0,
         "start": None,
@@ -4844,6 +4858,55 @@ def _item_subcategory(name):
     return ''
 
 
+# ── AC-source classification → ARS armorTypes (issue #4) ─────────────────────
+# ARS routes an item's AC contribution through `system.protection.type`:
+#   • armor / warding → `protection.ac` is the *base* AC (warding doesn't count
+#     as worn armor — bracers, archmage robes);
+#   • shield          → `protection.ac + modifier` is *added* to AC;
+#   • ring  / cloak   → `protection.modifier` is the bonus (ac stays 0), and
+#     only the best one applies (cloak only when no armor is worn).
+# Body armor stays "armor". The rest are detected from the runtime item name
+# (generic English equipment words only — no game numbers hardcoded; the +N
+# bonuses are parsed from the name the user's DAT supplies). Mirrors OSRIC's
+# items-gm modeling (Ring/Cloak of Protection, Bracers of Defense, …).
+_SHIELD_NAME_RE  = re.compile(r'\b(shield|buckler)\b', re.I)
+_WARDING_NAME_RE = re.compile(r'\b(bracers?|vambrace|robe)\b', re.I)
+
+
+def _armor_protection_type(name):
+    """protection.type for an is_armor PARTS item: shield / warding / armor."""
+    if _SHIELD_NAME_RE.search(name):
+        return 'shield'
+    if _WARDING_NAME_RE.search(name):
+        return 'warding'
+    return 'armor'
+
+
+def _ac_jewelry_protection(name):
+    """For a Ring/Cloak of Protection that PARTS.DAT does NOT flag as armor:
+    return (protection_type, ac_bonus, save_bonus, aura_distance_or_0) or None.
+    The +N AC bonus, the +N save bonus, and the aura radius are all read from
+    the runtime item name (e.g. 'Ring of Protection +2, 5-foot radius')."""
+    low = name.lower()
+    if 'protection' not in low:
+        return None
+    if re.search(r'\bring\b', low):
+        ptype = 'ring'
+    elif re.search(r'\b(cloak|cape|mantle)\b', low):
+        ptype = 'cloak'
+    else:
+        return None
+    m = re.search(r'protection\D*\+(\d+)', low)   # first +N after "protection" = AC
+    if not m:
+        return None
+    ac_bonus = int(m.group(1))
+    st = re.search(r'\+(\d+)\s*(?:st\b|saves?\b)', low)   # explicit "+N ST/Saves"
+    save_bonus = int(st.group(1)) if st else ac_bonus     # else == AC bonus (2e)
+    rad = re.search(r'(\d+)[\s-]*foot\s+radius', low)
+    aura_distance = int(rad.group(1)) if rad else 0
+    return (ptype, ac_bonus, save_bonus, aura_distance)
+
+
 def make_part_item(part, img_path=None, base_weapons=None):
     """Generate a Foundry/ARS Item from a parsed PART record, in the OSRIC
     2026.05.20 schema. Type inference: potion by name, weapon if it has a damage
@@ -4872,11 +4935,15 @@ def make_part_item(part, img_path=None, base_weapons=None):
     # the armor-AC marker (float32 -1.0) turns up spuriously in many weapon
     # records (yielding a bogus ac=0). Checking damage_type first avoids
     # mis-typing Spear / Long bow / Sword as armor.
+    # Ring/Cloak of Protection: PARTS.DAT doesn't flag these as armor (the bonus
+    # is only in the name), but ARS needs them as `armor` docs to route the AC.
+    jewelry = None if (has_weapon_traits or part['name'].lower().startswith('potion')) \
+        else _ac_jewelry_protection(part['name'])
     if part['name'].lower().startswith('potion'):
         ftype = 'potion'
     elif has_weapon_traits:
         ftype = 'weapon'
-    elif is_armor:
+    elif is_armor or jewelry:
         ftype = 'armor'
     else:
         ftype = 'item'
@@ -4943,16 +5010,51 @@ def make_part_item(part, img_path=None, base_weapons=None):
         # to attributes.size; set it so non-medium weapons don't all read medium.
         system["size"] = size
         system["actionGroups"] = []
-    elif ftype == 'armor':
-        # PARTS.DAT carries the base (unmodified) AC and the magic bonus
-        # separately; ARS applies the modifier on top of the base.
-        system["protection"] = {
-            "type": "armor",
-            "ac": part.get('armor_class', 10),
-            "modifier": magic_bonus,
-            "bulk": "none",
-            "points": {"min": 0, "max": 0, "value": 0},
-        }
+    effect_docs = []
+    if ftype == 'armor':
+        dat_ac = part.get('armor_class', 10)
+        if jewelry:
+            # Ring/Cloak of Protection: bonus lives in protection.modifier
+            # (ac stays 0); the matching save bonus is a separate effect. Radius
+            # versions deliver both via an aura instead (modifier 0).
+            ptype, ac_bonus, save_bonus, aura_dist = jewelry
+            origin = f"Compendium.{MODULE_ID}.adnd2-items.Item.{item_id}"
+            system["protection"] = {
+                "type": ptype,
+                "ac": 0,
+                "modifier": 0 if aura_dist else ac_bonus,
+                "bulk": "none",
+                "points": {"min": 0, "max": 0, "value": 0},
+            }
+            if aura_dist:
+                effect_docs.append(_make_effect_doc(
+                    f"{part['name']} (Aura)", img_path or "icons/svg/aura.svg",
+                    [{"key": "aura.system.mods.ac.value", "type": "add", "value": ac_bonus},
+                     {"key": "aura.system.mods.saves.all", "type": "custom",
+                      "value": {"formula": str(save_bonus), "properties": ""}}],
+                    origin, transfer=True,
+                    aura={"enabled": True, "distance": aura_dist}))
+            else:
+                effect_docs.append(_make_effect_doc(
+                    f"{part['name']} (Saves)", img_path or "icons/svg/upgrade.svg",
+                    [{"key": "system.mods.saves.all", "type": "custom",
+                      "value": {"formula": str(save_bonus), "properties": ""}}],
+                    origin, transfer=True))
+        else:
+            # is_armor item: body armor / shield / warding (bracers, robe).
+            # PARTS.DAT carries the base (unmodified) AC and the magic bonus
+            # separately; ARS applies the modifier on top of the base. For a
+            # shield the DAT stores the *resulting* AC (10 - bonus), so the
+            # shield's own contribution is 10 - dat_ac (added by ARS).
+            ptype = _armor_protection_type(part['name'])
+            ac_val = max(0, 10 - dat_ac) if ptype == 'shield' else dat_ac
+            system["protection"] = {
+                "type": ptype,
+                "ac": ac_val,
+                "modifier": magic_bonus,
+                "bulk": "none",
+                "points": {"min": 0, "max": 0, "value": 0},
+            }
         system["armorstyle"] = ""
         system["actionGroups"] = []
 
@@ -4960,15 +5062,16 @@ def make_part_item(part, img_path=None, base_weapons=None):
     if part.get('restricted_classes'):
         flags["adnd2"]["restrictedClasses"] = part['restricted_classes']
 
-    return {
+    item = {
         "_id": item_id,
         "name": part['name'],
         "type": ftype,
         "img": img_path or "icons/svg/item-bag.svg",
         "system": system,
-        "effects": [], "flags": flags,
+        "effects": [e["_id"] for e in effect_docs], "flags": flags,
         "folder": None, "sort": 0, "ownership": {"default": -1}, "_stats": _stats_block(),
     }
+    return item, effect_docs
 
 
 _SPELL_SCHOOL_ICONS = {
@@ -8396,19 +8499,24 @@ def migrate_items():
     TYPE_FOLDER = {'weapon': 'Weapons', 'armor': 'Armor',
                    'potion': 'Potions', 'item': 'Other Items'}
     count = 0
+    effects_written = 0
     for part in parts:
         img = extract_equip_icon(part.get('icon_id'), OUTPUT_IMG_ITEMS)
-        item = make_part_item(part, img, base_weapons=base_weapons)
+        item, item_effects = make_part_item(part, img, base_weapons=base_weapons)
         bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
         item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+        for ef in item_effects:
+            db.put(f'!items.effects!{item["_id"]}.{ef["_id"]}'.encode(),
+                   json.dumps(ef).encode())
+            effects_written += 1
         count += 1
         if count % 1000 == 0:
             print(f"    {count} items...")
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
-    print(f"  → {count} items in {len(folders)} folders")
+    print(f"  → {count} items in {len(folders)} folders ({effects_written} AC effects)")
     return count
 
 
