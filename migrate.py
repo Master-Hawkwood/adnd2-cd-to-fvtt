@@ -1006,6 +1006,42 @@ def parse_class_record(buf, start, end):
         thaco_offset = xp_offset + 99*4
         if start + thaco_offset + 99*4 <= len(buf):
             r['thaco_table'] = list(struct.unpack_from('<99i', buf, start + thaco_offset))
+        # Spell-slot table — two stacked 99-row tables in the post-THAC0 zone,
+        # 44-byte stride (11 int32 per row; cols 0-8 = slots for spell levels
+        # 1..9, cols 9-10 padding). Table 0 begins 56 B after the THAC0 table;
+        # Table 1 begins 101 rows further. In both, row i = character level i+1.
+        # Full casters (priests, all wizard kinds, Paladin) fill Table 0; Bard
+        # and Ranger leave Table 0 empty and fill Table 1. Prefer the first
+        # table that holds a sane progression (read at level=L in _build_class_
+        # ranks). Validated vs PHB 2e: Mage/Cleric/Druid L1, Paladin L9, Ranger
+        # L8, Bard L2 first-spell levels all exact.
+        spell_base = start + thaco_offset + 99*4 + 56
+
+        def _read_spell_rows(base_off):
+            rows = []
+            o = base_off
+            for _ in range(99):
+                if o + 44 > end:
+                    break
+                rows.append(list(struct.unpack_from('<9i', buf, o)))
+                o += 44
+            return rows
+
+        def _sane_spell_table(rows):
+            # Guard against picking up unrelated bytes: the leading rows must be
+            # a clean slot table (every value 0..9) with at least one slot.
+            head = rows[:25]
+            if not any(any(v > 0 for v in row) for row in head):
+                return False
+            return all(0 <= v <= 9 for row in head for v in row)
+
+        t0 = _read_spell_rows(spell_base)
+        if _sane_spell_table(t0):
+            r['spell_table'] = t0
+        else:
+            t1 = _read_spell_rows(spell_base + 101 * 44)
+            if _sane_spell_table(t1):
+                r['spell_table'] = t1
     # Save table — located by the "Normal Man" baseline row [16,18,17,20,19].
     # Layout: 1 baseline row (row 0) + 99 level rows, 5 int32 each. Columns:
     #   [paralyze/poison/death, rod/staff/wand, petrify/polymorph, breath, spell]
@@ -4449,14 +4485,87 @@ _CLASS_MAX_RANKS = 20   # 2e PHB Table 14 stops at level 20; beyond-20 is a
                          # features.lasthitdice and post-cap config.
 
 
+def _class_spell_kind(cls):
+    """Return 'arcane', 'divine', or None for a class's spell-slot table.
+    The CLASS.DAT spell table is just numbers; which spell system those slots
+    belong to is a structural Foundry-side categorization (which rank array to
+    fill), keyed off the class group and the three hybrid casters. Wizard-group
+    classes (Mage + specialists) cast arcane; priest-group classes (Cleric,
+    Druid) cast divine; Bard casts arcane and Paladin/Ranger cast divine."""
+    group = cls.get('group')
+    name = (cls.get('name') or '').lower()
+    if group == 'wizard' or name == 'bard':
+        return 'arcane'
+    if group == 'priest' or name in ('paladin', 'ranger'):
+        return 'divine'
+    return None
+
+
+# Paladin and Ranger cast priest spells at a reduced **casting level** (an
+# effective priest level lower than their character level), unlike full casters
+# whose casting level == character level. That column is NOT present in
+# CLASS.DAT (verified absent under every encoding/stride), but the PHB
+# progression tables print it explicitly as a "Casting Level" column: Table 17
+# (Paladin, PHB00060) and Table 18 (Ranger, PHB00062). DAT-absent → read it
+# from the HTM table at runtime (copyright-clean: parsed from the user's CD-ROM,
+# no values hardcoded — only the file names and the English column label).
+_PARTIAL_CASTER_LEVEL_FILES = {'paladin': 'PHB00060.HTM', 'ranger': 'PHB00062.HTM'}
+_partial_caster_levels_cache = {}
+
+
+def _get_partial_caster_levels(class_name):
+    """Return {character_level: casting_level} for a class whose spell-casting
+    level differs from its character level (Paladin, Ranger), parsed from the
+    'Casting Level' column of its PHB progression table. Empty dict otherwise."""
+    key = (class_name or '').lower()
+    if key in _partial_caster_levels_cache:
+        return _partial_caster_levels_cache[key]
+    out = {}
+    fname = _PARTIAL_CASTER_LEVEL_FILES.get(key)
+    if fname:
+        path = os.path.join(SOURCE_BASE, 'PHB', fname)
+        if os.path.exists(path):
+            with open(path, encoding='latin-1') as fh:
+                soup = BeautifulSoup(fh.read(), 'html.parser')
+            rows = [[c.get_text(strip=True) for c in tr.find_all(['td', 'th'])]
+                    for tr in soup.find_all('tr')]
+            # The casting-level column header cell reads "Casting"; its index
+            # varies (Paladin col 1, Ranger col 3). Char level is always col 0.
+            cidx = next((j for r in rows for j, cell in enumerate(r)
+                         if cell.lower() == 'casting'), None)
+            if cidx is not None:
+                for r in rows:
+                    if not r or not r[0].rstrip('*').isdigit() or cidx >= len(r):
+                        continue
+                    cl = r[cidx].rstrip('*').strip()
+                    if cl.isdigit():
+                        out[int(r[0].rstrip('*'))] = int(cl)
+    _partial_caster_levels_cache[key] = out
+    return out
+
+
 def _build_class_ranks(cls):
     """Emit the ARSClassRank list from CLASS.DAT-extracted xp/thaco/save tables.
     Capped at level 20 (standard 2e advancement-table length). Saves are read
     from the CLASS.DAT save_table (5 columns → 10 ARS keys via _SAVE_COL_MAP);
-    spell slots and BAB default to neutral schema values."""
+    spell slots come from the CLASS.DAT spell_table (see parse_class_record);
+    BAB defaults to a neutral schema value."""
     xp_table       = cls.get('xp_table',    []) or []
     thaco_table    = cls.get('thaco_table', []) or []
     save_table     = list(cls.get('save_table', []) or [])
+    spell_table    = cls.get('spell_table', []) or []
+    spell_kind     = _class_spell_kind(cls) if spell_table else None
+    # Paladin/Ranger cast at a reduced "casting level" (see _get_partial_caster_
+    # levels); empty for full casters, whose casting level == character level.
+    partial_cl     = _get_partial_caster_levels(cls.get('name', '')) if spell_kind else {}
+    partial_cl_max = max(partial_cl.values()) if partial_cl else 0
+
+    def _eff_caster_level(level):
+        # Full casters: casting level == character level. Partial casters: read
+        # from the parsed table; beyond its last printed row carry the cap.
+        if not partial_cl:
+            return level
+        return partial_cl.get(level, partial_cl_max)
     skill_pts_start = cls.get('skill_pts_start', 0) or 0
     skill_pts_level = cls.get('skill_pts_level', 0) or 0
     hit_die       = cls.get('hit_die')
@@ -4492,6 +4601,27 @@ def _build_class_ranks(cls):
             par, rod, pet, bre, spl = row[0], row[1], row[2], row[3], row[4]
         else:
             par = rod = pet = bre = spl = 20
+        # Spell slots: spell_table[i] is the row for this level (row i = char
+        # level i+1). Cols 0..8 = slots for spell levels 1..9. ARS stores them
+        # 1-indexed (index 0 = padding): arcane is length 10 (spell levels 1-9),
+        # divine length 8 (spell levels 1-7). casterlevel for the cast type is
+        # the character level once any slot exists, else 0 (matches OSRIC).
+        arcane = [0]*10
+        divine = [0]*8
+        caster_arcane = caster_divine = 0
+        if spell_kind and i < len(spell_table):
+            srow = spell_table[i]
+            has_slots = any(v > 0 for v in srow)
+            if spell_kind == 'arcane':
+                for s in range(1, 10):
+                    arcane[s] = srow[s-1]
+                if has_slots:
+                    caster_arcane = _eff_caster_level(level)
+            else:
+                for s in range(1, 8):
+                    divine[s] = srow[s-1]
+                if has_slots:
+                    caster_divine = _eff_caster_level(level)
         ranks.append({
             "level":         level,
             # thaco_table[0] is a "Normal Man" / level-0 baseline entry — same
@@ -4512,11 +4642,11 @@ def _build_class_ranks(cls):
             "petrification": pet, "polymorph": pet,
             "breath": bre,
             "spell": spl,
-            "arcane": [0]*10,
-            "divine": [0]*8,
+            "arcane": arcane,
+            "divine": divine,
             "psionic": {"disciplines": 0, "sciences": 0, "devotions": 0,
                         "defenseModes": 0, "psp": 0},
-            "casterlevel": {"arcane": 0, "divine": 0, "psionic": 1},
+            "casterlevel": {"arcane": caster_arcane, "divine": caster_divine, "psionic": 1},
         })
     return ranks
 
