@@ -1627,8 +1627,8 @@ def parse_treasure():
 _SCHOOL_NAMES = {'Abjuration','Alteration','Conjuration','Divination','Enchantment','Illusion',
     'Invocation','Evocation','Necromancy','Charm','Alchemy','Geometry','Shadow','Song','Wild Magic',
     'Universal','Greater Divination','Lesser Divination','Charm/Enchantment','Conjuration/Summoning',
-    'Evocation/Invocation','Greater Illusion','Illusion/Phantasm','Artifice','Dimension','Force',
-    'Mentalist'}
+    'Enchantment/Charm','Invocation/Evocation','Evocation/Invocation','Greater Illusion',
+    'Illusion/Phantasm','Artifice','Dimension','Force','Mentalist'}
 _SPHERE_NAMES = {'All','Animal','Astral','Chaos','Combat','Creation','Elemental','Elemental Air',
     'Elemental Fire','Elemental Water','Elemental Earth','Elemental All','Guardian','Healing','Law',
     'Necromantic','Numbers','Plant','Protection','Summoning','Sun','Thought','Time','Travelers',
@@ -1670,10 +1670,12 @@ def parse_spell_record(buf, start, end):
     # Skip past the int32 header (20 bytes)
     p = p + 20
     for fname in fields_order:
-        # Skip bytes until we find a valid Pascal string start (tolerates non-zero junk)
+        # Skip bytes until we find a valid Pascal string start (tolerates non-zero junk).
+        # n >= 1 is intentional: casting_time is often a single digit ('1','2','3') and
+        # the old n >= 2 filter caused it to be skipped, shifting all subsequent fields.
         while p < end - 1:
             n = buf[p]
-            if 2 <= n <= 60 and p+1+n <= end:
+            if 1 <= n <= 60 and p+1+n <= end:
                 seq = buf[p+1:p+1+n]
                 if all(32 <= b < 127 for b in seq):
                     r[fname] = seq.decode('latin-1')
@@ -1682,6 +1684,21 @@ def parse_spell_record(buf, start, end):
             p += 1
         else:
             break  # ran out of buffer
+    # Some records embed an extra text field between saving_throw and school (e.g. brief
+    # effect summaries like "Restores 1d8 hit points.").  If 'school' landed on a non-
+    # school string, scan forward until we find a recognised school/sphere name.
+    if r.get('school') and r['school'] not in _SCHOOL_NAMES and r['school'] not in _SPHERE_NAMES:
+        while p < end - 1:
+            n = buf[p]
+            if 1 <= n <= 60 and p+1+n <= end:
+                seq = buf[p+1:p+1+n]
+                if all(32 <= b < 127 for b in seq):
+                    s = seq.decode('latin-1')
+                    if s in _SCHOOL_NAMES or s in _SPHERE_NAMES:
+                        r['school'] = s
+                        p += 1 + n
+                        break
+            p += 1
     # Collect remaining school/sphere references
     extras = []
     while p < end - 1:
