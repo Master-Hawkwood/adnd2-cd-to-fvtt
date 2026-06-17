@@ -974,6 +974,7 @@ def parse_class_record(buf, start, end):
     # Locate by scanning for plausible start (small int < 5000)
     chunk = buf[start:start+1024]
     xp_offset = None
+    thaco_offset = None
     for off in range(30, len(chunk) - 4*15):
         try:
             seq = struct.unpack_from('<15i', chunk, off)
@@ -1042,21 +1043,20 @@ def parse_class_record(buf, start, end):
             t1 = _read_spell_rows(spell_base + 101 * 44)
             if _sane_spell_table(t1):
                 r['spell_table'] = t1
-    # Save table — located by the "Normal Man" baseline row [16,18,17,20,19].
-    # Layout: 1 baseline row (row 0) + 99 level rows, 5 int32 each. Columns:
-    #   [paralyze/poison/death, rod/staff/wand, petrify/polymorph, breath, spell]
-    # rows[L] = saving throws at class level L (rows[0] = level-0 / Normal Man).
-    # Validated vs PHB 2e for fighter/thief/cleric/mage.
-    sig = struct.pack('<5i', 16, 18, 17, 20, 19)
-    sp = buf.find(sig, start, end)
-    if sp > 0:
-        rows = []
-        o = sp
-        while len(rows) < 100 and o + 20 <= end:
-            rows.append(list(struct.unpack_from('<5i', buf, o)))
-            o += 20
-        if len(rows) >= 2:
-            r['save_table'] = rows
+    # Save table — 100 rows × 5 int32 (Normal Man + 99 levels).
+    # Columns: [paralyze/poison/death, rod/staff/wand, petrify/polymorph, breath, spell]
+    # Offset 15806 bytes from thaco_offset is constant for all 26 classes on the
+    # AD&D 2e Core Rules CD-ROM expansion (validated Fighter → Air Elementalist).
+    if thaco_offset is not None:
+        sp = start + thaco_offset + 15806
+        if sp + 100 * 20 <= end:
+            rows = []
+            o = sp
+            while len(rows) < 100 and o + 20 <= end:
+                rows.append(list(struct.unpack_from('<5i', buf, o)))
+                o += 20
+            if len(rows) >= 2:
+                r['save_table'] = rows
     return r
 
 
@@ -4494,9 +4494,73 @@ _CLASS_MATRIX_TABLE = {
 }
 
 
-_CLASS_MAX_RANKS = 20   # 2e PHB Table 14 stops at level 20; beyond-20 is a
-                         # fixed per-level XP/HP rule that ARS handles via
-                         # features.lasthitdice and post-cap config.
+_CLASS_MAX_RANKS = 99   # CLASS.DAT stores 99 rows for xp/thaco/save/spell tables;
+                         # emit all of them so S&P high-level advancement works.
+
+# HLC (High-Level Campaigns) THAC0 limits: parsed from HLC00210.HTM at first use.
+# Lower THAC0 = better; limits are minimum values (floor for the descent).
+# GROUP → minimum THAC0 allowed by HLC rules.
+_HLC_THACO_LIMITS: dict | None = None
+
+def _get_hlc_thaco_limits() -> dict:
+    global _HLC_THACO_LIMITS
+    if _HLC_THACO_LIMITS is not None:
+        return _HLC_THACO_LIMITS
+    path = _hlc_path('HLC00210.HTM')
+    limits = {}
+    if path and os.path.exists(path):
+        from bs4 import BeautifulSoup
+        with open(path, encoding='latin-1') as f:
+            soup = BeautifulSoup(f, 'html.parser')
+        for table in soup.find_all('table'):
+            for tr in table.find_all('tr'):
+                cells = [td.get_text(strip=True) for td in tr.find_all('td')]
+                if len(cells) >= 2:
+                    group = cells[0].strip().lower()
+                    try:
+                        limit = int(cells[1].strip())
+                        limits[group] = limit
+                    except ValueError:
+                        pass
+    _HLC_THACO_LIMITS = limits
+    return limits
+
+def _hlc_path(filename):
+    """Return the path to a HLC HTML file, or None if not found.
+    SOURCE_BASE already points at .../MACBOOKS/HTML; HLC is a subdirectory."""
+    p = os.path.join(SOURCE_BASE, 'HLC', filename)
+    return p if os.path.exists(p) else None
+
+# HLC Druid XP for levels 21-30: sourced from HLC00226.HTM at first use.
+# Druid CLASS.DAT xp_table uses the Hierophant competition schedule, not HLC's
+# simplified linear table. We override levels 21+ with HLC values.
+_HLC_DRUID_XP: list | None = None  # index 0 = L21 XP threshold
+
+def _get_hlc_druid_xp() -> list:
+    global _HLC_DRUID_XP
+    if _HLC_DRUID_XP is not None:
+        return _HLC_DRUID_XP
+    path = _hlc_path('HLC00226.HTM')
+    xp_list = []
+    if path and os.path.exists(path):
+        from bs4 import BeautifulSoup
+        with open(path, encoding='latin-1') as f:
+            soup = BeautifulSoup(f, 'html.parser')
+        for table in soup.find_all('table'):
+            for tr in table.find_all('tr'):
+                cells = [td.get_text(strip=True) for td in tr.find_all('td')]
+                if len(cells) >= 3:
+                    try:
+                        lvl = int(cells[0])
+                        # Column 2 = Druid XP (column 1 = Cleric XP)
+                        xp_str = cells[2].replace(',', '').replace(' ', '')
+                        xp = int(xp_str)
+                        if lvl >= 21:
+                            xp_list.append(xp)
+                    except (ValueError, IndexError):
+                        pass
+    _HLC_DRUID_XP = xp_list
+    return xp_list
 
 
 def _class_spell_kind(cls):
@@ -4560,10 +4624,10 @@ def _get_partial_caster_levels(class_name):
 
 def _build_class_ranks(cls):
     """Emit the ARSClassRank list from CLASS.DAT-extracted xp/thaco/save tables.
-    Capped at level 20 (standard 2e advancement-table length). Saves are read
-    from the CLASS.DAT save_table (5 columns → 10 ARS keys via _SAVE_COL_MAP);
-    spell slots come from the CLASS.DAT spell_table (see parse_class_record);
-    BAB defaults to a neutral schema value."""
+    99 levels (full CLASS.DAT range). THAC0 capped at HLC Table 39 limits for
+    L21+ (parsed from HLC00210.HTM). Druid XP at L21-30 sourced from HLC Table
+    45 (HLC00226.HTM) instead of CLASS.DAT's Hierophant competition schedule.
+    Saves: CLASS.DAT 5 columns → 10 ARS keys via _SAVE_COL_MAP. BAB: 0."""
     xp_table       = cls.get('xp_table',    []) or []
     thaco_table    = cls.get('thaco_table', []) or []
     save_table     = list(cls.get('save_table', []) or [])
@@ -4594,6 +4658,17 @@ def _build_class_ranks(cls):
     # a value-comparison heuristic, so it works even if a warrior's L1 saves
     # happened to match the Normal Man row.
     save_base = 1 if cls.get('group') == 'warrior' else 2
+    # HLC Table 39 THAC0 limits by class group (parsed from HLC00210.HTM).
+    # group label in HLC HTML matches the PHB group names: "priest"/"rogue"/
+    # "warrior"/"wizard". THAC0 is descending; limit = best (lowest) allowed.
+    hlc_limits = _get_hlc_thaco_limits()
+    group_name = cls.get('group', '')
+    thaco_floor = hlc_limits.get(group_name)   # None if not in HLC (e.g. psionicist)
+    # Druid XP note: CLASS.DAT uses the PHB Hierophant competition schedule
+    # (cumulative, monotonically increasing: 3M@L15 … 5.5M@L20 … 6M@L21 …).
+    # HLC Table 45 redefines Druid XP from a lower base (L20=2M), which would
+    # create a non-monotonic decrease at the L20→L21 boundary. CLASS.DAT is kept
+    # for all Druid XP levels; only the THAC0 cap uses HLC.
     real_n = min(_CLASS_MAX_RANKS, max(len(xp_table), len(thaco_table)))
     if real_n == 0:
         return []
@@ -4611,7 +4686,9 @@ def _build_class_ranks(cls):
         else:
             hdformula = f"d{hit_die}" if hit_die else "1d6"
         # Saves: columns are [par/poi/death, rod/staff/wand, pet/poly, breath, spell].
-        save_idx = save_base + level - 1
+        # Clamp to the last row so L99 non-warriors don't fall past the table end
+        # (save_base=2 would need index 100 at L99, but the table has only 100 rows).
+        save_idx = min(save_base + level - 1, len(save_table) - 1) if save_table else 0
         if save_table and save_idx < len(save_table):
             row = save_table[save_idx]
             par, rod, pet, bre, spl = row[0], row[1], row[2], row[3], row[4]
@@ -4638,16 +4715,25 @@ def _build_class_ranks(cls):
                     divine[s] = srow[s-1]
                 if has_slots:
                     caster_divine = _eff_caster_level(level)
+        # THAC0: thaco_table has 99 entries (indices 0-98); index 0 = Normal Man,
+        # index N = level-N THAC0. Level 99 would need index 99 which is out of
+        # range, so clamp to the last available entry (repeating the plateau).
+        # Then cap at HLC Table 39 limit for L21+ (lower = better; limit = floor).
+        raw_thaco = thaco_table[min(level, len(thaco_table) - 1)] if thaco_table else 20
+        if thaco_floor is not None and level > 20:
+            thaco = max(raw_thaco, thaco_floor)
+        else:
+            thaco = raw_thaco
+        # xp_table[i] = XP threshold to reach level i+2; stored in the rank for
+        # level i+1 as "XP needed to advance to the next level" (FVTT convention).
+        xp = xp_table[i] if i < len(xp_table) else 0
         ranks.append({
             "level":         level,
-            # thaco_table[0] is a "Normal Man" / level-0 baseline entry — same
-            # leading-row quirk as save_table (compare the comment above).
-            # Per-class-level THAC0 starts at index `level`, not `level - 1`.
-            "thaco":         thaco_table[level] if level < len(thaco_table) else 20,
+            "thaco":         thaco,
             "bab":           0,
             "numatks":       "1/1",
             "turnLevel":     0,
-            "xp":            xp_table[i] if i < len(xp_table) else 0,
+            "xp":            xp,
             "hdformula":     hdformula,
             "baseMove":      None,
             "baseAC":        None,
