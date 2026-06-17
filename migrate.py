@@ -4585,13 +4585,15 @@ def _build_class_ranks(cls):
     hit_die       = cls.get('hit_die')
     hit_dice_cap  = cls.get('hit_dice_cap')  or 0
     hp_after_cap  = cls.get('hp_after_cap')  or 0
-    # Warriors (Fighter/Paladin/Ranger) have save_table[1]=L1 saves directly.
-    # All other classes scan lands one row early (the Normal Man signature
-    # [16,18,17,20,19] appears twice at the start of their record), making
-    # save_table[1] still Normal Man and L1 saves at save_table[2].
-    # Detect by identical first two rows and strip the extra header.
-    if len(save_table) > 2 and save_table[0] == save_table[1]:
-        save_table = save_table[1:]
+    # CLASS.DAT save-table layout (confirmed for all 26 classes):
+    #   Warriors (group='warrior'): row 0 = Normal Man, row 1 = L1 saves.
+    #   All other groups: row 0 = row 1 = Normal Man (signature appears twice),
+    #   row 2 = L1 saves.
+    # Access L-N saves via save_table[save_base + N - 1] where save_base is
+    # 1 for warriors and 2 for everyone else. This is group-driven rather than
+    # a value-comparison heuristic, so it works even if a warrior's L1 saves
+    # happened to match the Normal Man row.
+    save_base = 1 if cls.get('group') == 'warrior' else 2
     real_n = min(_CLASS_MAX_RANKS, max(len(xp_table), len(thaco_table)))
     if real_n == 0:
         return []
@@ -4608,10 +4610,10 @@ def _build_class_ranks(cls):
             hdformula = str(hp_after_cap)
         else:
             hdformula = f"d{hit_die}" if hit_die else "1d6"
-        # Saves: save_table[0]=Normal Man, save_table[L]=class level L.
-        # Columns: [par/poi/death, rod/staff/wand, pet/poly, breath, spell].
-        if save_table and level < len(save_table):
-            row = save_table[level]
+        # Saves: columns are [par/poi/death, rod/staff/wand, pet/poly, breath, spell].
+        save_idx = save_base + level - 1
+        if save_table and save_idx < len(save_table):
+            row = save_table[save_idx]
             par, rod, pet, bre, spl = row[0], row[1], row[2], row[3], row[4]
         else:
             par = rod = pet = bre = spl = 20
