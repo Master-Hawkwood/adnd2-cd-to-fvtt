@@ -10509,11 +10509,56 @@ def migrate_book(book_config, folder_id, db, stats, book_sort=0):
         stats['journals'] += 1
 
 
+def _check_cdrom_version():
+    """Warn if CLASS.DAT MD5 doesn't match the tested CD-ROM version.
+
+    This script targets exclusively the AD&D 2e Core Rules CD-ROM Expansion
+    (Evermore Entertainment, 1999, v2.00.000). The checksum is taken from
+    CLASS.DAT because it is the most structured and version-sensitive file.
+    A mismatch means the CD-ROM content differs from what the script was
+    developed and tested against; parsing offsets and field layouts may be
+    wrong, producing silent errors or crashes.
+    """
+    import hashlib
+    KNOWN_MD5 = '8d8a23d00ed6759d11eda0cef465333c'  # CLASS.DAT, v2.00.000 (1999-06-14)
+    dat_path = os.path.join(DATABASE_BASE, 'CLASS.DAT')
+    if not os.path.exists(dat_path):
+        return  # DATABASE/ absent — Phase 3 will skip gracefully on its own
+    with open(dat_path, 'rb') as f:
+        actual_md5 = hashlib.md5(f.read()).hexdigest()
+    if actual_md5 == KNOWN_MD5:
+        return
+    print()
+    print("=" * 70)
+    print("WARNING: CD-ROM content differs from the tested version")
+    print("=" * 70)
+    print(f"  Expected CLASS.DAT MD5 : {KNOWN_MD5}")
+    print(f"  Found    CLASS.DAT MD5 : {actual_md5}")
+    print()
+    print("  This script was developed and tested exclusively against the")
+    print("  AD&D 2e Core Rules CD-ROM Expansion (Evermore Entertainment,")
+    print("  1999, version 2.00.000). A different version may have a")
+    print("  different binary layout, causing silent errors or crashes.")
+    print()
+    print("  To verify your CD-ROM version, open DATA.TAG at the root of")
+    print("  your CD-ROM and check the following fields:")
+    print("    Application=AD&D Core Rules 2.0 Expansion")
+    print("    Version=2.00.000")
+    print("    Misc=06-14-99")
+    print()
+    answer = input("  Continue anyway? [y/N] ").strip().lower()
+    if answer != 'y':
+        print("Aborted.")
+        raise SystemExit(1)
+    print()
+
+
 def main():
     """Entry point: wipe the output module, run Phase 2 (journals) into the
     journals pack, then Phases 3-5 (the migrate_* drivers) into their packs,
     write module.json, and print a summary. Phase 3+ is skipped gracefully if the
     DATABASE/ directory is absent."""
+    _check_cdrom_version()
     print("AD&D 2e Migration")
     print(f"Output: {OUTPUT_DB}")
 
