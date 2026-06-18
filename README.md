@@ -13,13 +13,13 @@ Running the script produces an `adnd2-compendium/` directory containing **11 Fou
 | Pack | Contents |
 |---|---|
 | `adnd2-journals` | 19 journal entries, 999 pages of rulebook text |
-| `adnd2-races` | 45 race items with ability modifiers, movement, active effects, and CP variants |
-| `adnd2-classes` | 26 class items with per-level advancement, PHB abilities, and CP variants |
+| `adnd2-races` | 53 race items (45 base + 8 CP variants) with ability modifiers, movement, and active effects |
+| `adnd2-classes` | 43 class items (26 base + 17 CP variants) with per-level advancement and PHB abilities |
 | `adnd2-items` | 4 584 equipment items (weapons, armor, potions, magic items, gems) with AEG/DMG descriptions |
-| `adnd2-spells` | 931 arcane and divine spells with cast actions |
+| `adnd2-spells` | 933 arcane and divine spells with cast actions (every reversible spell's reverse form is linked as a child of its primary) |
 | `adnd2-powers` | 241 psionic powers with discipline and power score, plus 5 attack modes and 5 defense modes |
 | `adnd2-monsters` | 1 524 NPC actors with full stat blocks, biography, and icons |
-| `adnd2-proficiencies` | 104 weapon proficiency items |
+| `adnd2-proficiencies` | 106 weapon proficiency items |
 | `adnd2-skills` | 156 skill items (rogue skills + PHB and S&P nonweapon proficiencies) |
 | `adnd2-backgrounds` | 208 character kit items with bonus proficiency auto-grants and benefit/hindrance abilities |
 | `adnd2-treasure` | 486 treasure roll tables with 3 480 results |
