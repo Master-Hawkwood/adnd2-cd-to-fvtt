@@ -2823,70 +2823,139 @@ def _ability_effect_changes(raw_name):
     raw_name = re.sub(r'\s*\(\d+\s*CP\)\s*$', '', raw_name)
     low = raw_name.lower()
 
-    def _save(props, formula='2'):
+    _CON_SAVE_FORMULA = '(min(5,max(1,round(@abilities.con.value/3.5))))'
+    def _save(props, label):
+        # Source the bonus magnitude from the S&P ability description at
+        # runtime — never hardcode the rules value (copyright + accuracy).
+        # If the +N can't be parsed, emit no change rather than fabricate.
+        desc = _ability_description(label)
+        m = re.search(r'\+\s*(\d+)\b', desc) if desc else None
+        if not m:
+            return []
         return [{'key':'system.mods.saves.all','type':'custom',
-                 'value':{'formula':formula,'properties':props},
-                 'priority':20,'phase':'initial'}]
-    def _add(key, val):
-        return [{'key':key,'type':'add','value':str(val),
-                 'priority':20,'phase':'initial'}]
+                 'value':{'formula':m.group(1),'properties':props},
+                 'priority':20,'phase':'initial','last':''}]
+    def _con_saves():
+        # CON-based save bonus (dwarf/gnome/halfling PHB pattern):
+        # applies to saves vs. poison, spell, rod, staff, wand only —
+        # NOT vs. paralyzation, petrification, polymorph, or breath.
+        # Formula from OSRIC dwarves/gnomes: round(CON/3.5), clamped 1-5.
+        _c = {'type':'custom','priority':20,'phase':'initial','last':''}
+        return [dict(_c, key=f'system.mods.saves.{s}',
+                     value={'formula':_CON_SAVE_FORMULA,'properties':''})
+                for s in ('poison','rod','staff','wand','spell')]
+    # We emit a mechanical effect ONLY where ARS can apply the bonus
+    # faithfully (and source its magnitude at runtime, never hardcoded):
+    #   • resistances → a save bonus filtered to a damage type via `properties`
+    #   • CON saves   → the per-save CON formula
+    #   • infravision → token vision, range parsed from the description
+    # The other S&P character-point buys are CONDITIONAL (vs a creature type,
+    # a weapon subset, a terrain), per-level, per-race-variable, or raise an
+    # S&P sub-ability score ARS Variant 2 does not track. ARS cannot gate a
+    # flat effect on those conditions, so an unconditional `+N` would be both
+    # wrong and a hardcoded rules value — we leave them descriptive-only.
 
-    # ── Specific stat bonuses ──
-    if low == 'attack bonus':            return _add('system.mods.attack.value', 1)
-    if low == 'damage bonus':            return _add('system.mods.damage.value', 1)
-    if low == 'aim bonus':               return _add('system.mods.attack.ranged', 1)
-    if low == 'melee combat' or low == 'melee combat bonus':
-                                         return _add('system.mods.attack.melee', 1)
-    if low in ('hit point bonus','health bonus','fitness bonus',
-               'constitution/health bonus'):
-                                         return _add('system.attributes.hp.base', 1)
-    if low in ('defensive bonus','tough hide','dense skin'):
-                                         return _add('system.mods.ac.value', -1)
-    if low == 'magic resistance':        return _add('system.mods.magic.resist', 10)
-    # 'Experience bonus' has no stock ARS change key (system.xpbonus lives on
-    # the class item itself, set when owned — not an actor-level effect path);
-    # fall through to descriptive-only.
+    # ── Save bonus vs a damage type (the `properties` filter IS the condition) ──
+    if low == 'cold resistance':         return _save('cold', raw_name)
+    if low == 'heat resistance':         return _save('fire', raw_name)
+    if low == 'poison resistance':       return _save('poison', raw_name)
+    # ── CON-based save package (poison/rod/staff/wand/spell only) ──
+    if low in ('saving throw bonuses','saving throw bonus','save bonus',
+               'resistance'):
+                                         return _con_saves()
 
-    # ── Save bonuses (descending tags: properties filter the save trigger) ──
-    if low == 'cold resistance':         return _save('cold')
-    if low == 'heat resistance':         return _save('fire')
-    if low == 'poison resistance':       return _save('poison')
-    if low in ('saving throw bonuses','saving throw bonus','save bonus'):
-                                         return _save('', '1')   # +1 all saves
-    if low == 'resistance':              return _save('', '1')
-
-    # ── Weapon bonuses (over-approximation: +1 to the matching attack mode) ──
-    MELEE_WEAPONS = ('axe','warhammer','mace','sword bonus','short sword',
-                     'dagger bonus','spear bonus','pick bonus','trident bonus')
-    RANGED_WEAPONS = ('bow bonus','crossbow','dart bonus','sling bonus',
-                      'javelin bonus')
-    if any(w in low for w in MELEE_WEAPONS):
-        return _add('system.mods.attack.melee', 1)
-    if any(w in low for w in RANGED_WEAPONS):
-        return _add('system.mods.attack.ranged', 1)
-
-    # ── Infravision (S&P infravision is 60 ft for all races that buy it) ──
+    # ── Infravision (range read from the S&P description, e.g. "to 60 feet") ──
     if low == 'infravision':
+        desc = _ability_description(raw_name)
+        m = re.search(r'(\d+)\s*(?:feet|foot|ft)\b', desc) if desc else None
+        if not m:
+            return []
         return [{'key':'special.vision','type':'custom',
-                 'value':{'range':60,'angle':'360','mode':'basic'},
+                 'value':{'range':int(m.group(1)),'angle':'360','mode':'basic'},
                  'priority':20,'phase':'initial'}]
 
-    # ── Stealth (boost both Hide in Shadows and Move Silently) ──
-    if low == 'stealth':
-        return [
-            {'key':'system.mods.skill.hide-in-shadows','type':'add','value':'10',
-             'priority':20,'phase':'initial'},
-            {'key':'system.mods.skill.move-silently','type':'add','value':'10',
-             'priority':20,'phase':'initial'},
-        ]
-    if low == 'hide':
-        return _add('system.mods.skill.hide-in-shadows', 10)
-
-    # ── Secret Doors (Half-elf / Halfling / Human 'Secret Doors' bullet) ──
-    # The buy gives the elf-style passive 1/6 detection. No stock immunity
-    # or vision key fits; descriptive-only is the honest answer for now.
-    # ── Everything else: descriptive only ──
+    # ── Conditional / variable / sub-ability buys (Attack/Damage/Aim/Melee/
+    #    Defensive/Hit-point/Health/Fitness bonus, per-weapon affinities,
+    #    Stealth, Hide, Magic resistance, Secret Doors, …): descriptive only.
+    #    The dwarf "+1 vs goblinoids" is already emitted as a proper
+    #    `target.type` conditional effect via the PHB combat-bonus path
+    #    (_build_race_combat_effect_docs), so it is not duplicated here. ──
     return []
+
+
+# ── Runtime parsers for ability/action numeric values. Copyright: every rules
+#    number (daily-use count, points-per-level, granted-spell list, detection
+#    chance) is read from the user's source text at runtime, never hardcoded. ──
+_WORD_NUM = {'once': 1, 'twice': 2, 'thrice': 3, 'one': 1, 'two': 2,
+             'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7,
+             'eight': 8, 'nine': 9, 'ten': 10}
+
+
+def _strip_tags(text):
+    return re.sub(r'<[^>]+>', ' ', text) if text else ''
+
+
+def _parse_per_day(text):
+    """Daily-use count from prose ('once a day', 'three times per day',
+    '3/day'). Returns int, or 0 when none is stated — 0 means unlimited in
+    ARS, so we never fabricate a frequency."""
+    t = _strip_tags(text).lower()
+    if not t:
+        return 0
+    m = re.search(r'(\d+|once|twice|thrice|one|two|three|four|five|six|'
+                  r'seven|eight|nine|ten)\s+times?\s+(?:per|a)\s+day', t)
+    if not m:
+        m = re.search(r'(once|twice|thrice)\s+(?:per\s+|a\s+)?day', t)
+    if not m:
+        m = re.search(r'(\d+)\s*/\s*day', t)
+    if not m:
+        return 0
+    g = m.group(1)
+    return int(g) if g.isdigit() else _WORD_NUM.get(g, 0)
+
+
+def _parse_points_per_level(text):
+    """'N hit points per (experience) level' → N, else None."""
+    t = _strip_tags(text).lower()
+    m = re.search(r'(\d+)\s+(?:hit\s+)?points?\s+per\s+(?:experience\s+)?level', t)
+    return int(m.group(1)) if m else None
+
+
+def _parse_spell_casts(text):
+    """Ordered list of spell names a racial 'Spell abilities' grants, parsed
+    from prose like 'can cast X, Y, and Z ... can add A, B, and C'. Returns
+    Title-Cased names ([] if unparseable)."""
+    t = _strip_tags(text)
+    out, seen = [], set()
+    for m in re.finditer(r'\b(?:cast|add)\b,?\s+([a-z][a-z,\s]+?)'
+                         r'(?:\s+as\s+a\b|\.|$)', t, re.I):
+        for part in re.split(r',|\band\b', m.group(1)):
+            nm = part.strip(' .')
+            if nm and 2 <= len(nm) <= 40:
+                key = nm.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(nm.title())
+    return out
+
+
+def _parse_secret_door_chances():
+    """Elf-style secret/concealed door detection chances, parsed in source
+    order from the PHB Elf entry ('roll a 1 on 1d6', 'roll a 1 or 2 on 1d6',
+    'roll a 1, 2, or 3 on 1d6'). Returns [(die, target), ...] or [] if the
+    source can't be read. 'Elf' is a lookup key into _RACE_HTML_FILES, not
+    game data."""
+    txt = _phb_page_text('Elf')
+    if not txt:
+        return []
+    out = []
+    # "roll a 1 on 1d6" / "roll a 1 or 2 on 1d6" / "roll a 1, 2, or 3 on 1d6"
+    for m in re.finditer(r'roll a ([\d,\s or]*?\d)\s+on 1d(\d+)', txt, re.I):
+        die = int(m.group(2))
+        faces = [int(x) for x in re.findall(r'\d+', m.group(1))]
+        if faces:
+            out.append((die, max(faces)))
+    return out
 
 
 def _ability_actions(raw_name):
@@ -2922,51 +2991,56 @@ def _ability_actions(raw_name):
     }
     if low in SPELL_LIKE_DAILY:
         nm, icon, save = SPELL_LIKE_DAILY[low]
+        # Frequency read from the description ('once a day', …); 0 = at-will
+        # when the text states no limit — never a hardcoded daily count.
+        per_day = _parse_per_day(_ability_description(raw_name))
         return [_make_action_group(nm, icon, [
             _make_action(nm, type_='cast', img=icon,
-                         save_type=save, charges_per_day=1)
+                         save_type=save, charges_per_day=per_day)
         ])]
 
-    # ── Spell Abilities (Elf 15 CP): six spell-like abilities granted
-    # by level. Build six separate 1/day actions in one group.
+    # ── Spell Abilities (Elf): the granted spell-like abilities and their
+    # frequency are read from the ability description at runtime (never a
+    # hardcoded spell list). Save type is left 'none' — the chat card carries
+    # the description for manual resolution rather than guessing per spell.
     if low == 'spell abilities':
-        ELF_SPELLS = [
-            ('Faerie Fire',     'spell'),
-            ('Dancing Lights',  'none'),
-            ('Darkness',        'none'),
-            ('Levitate',        'spell'),
-            ('Detect Magic',    'none'),
-            ('Know Alignment',  'none'),
-        ]
-        return [_make_action_group('Elven Spell Abilities', _FOUNDRY_ICON_DEFAULT, [
+        desc = _ability_description(raw_name)
+        spells = _parse_spell_casts(desc)
+        if not spells:
+            return []
+        per_day = _parse_per_day(desc)
+        return [_make_action_group('Spell Abilities', _FOUNDRY_ICON_DEFAULT, [
             _make_action(nm, type_='cast', img=_FOUNDRY_ICON_DEFAULT,
-                         save_type=save, charges_per_day=1)
-            for nm, save in ELF_SPELLS
+                         save_type='none', charges_per_day=per_day)
+            for nm in spells
         ])]
 
-    # ── Paralyzing Bite (Thri-kreen): melee attack → damage → save vs paralysis
+    # ── Paralyzing Bite (Thri-kreen): bite melee → paralysis save. The bite
+    # *damage* is not stated in this ability's text (it lives in the monster
+    # stat block, not here), so no damage action is fabricated. The save type
+    # is read from the description ('save versus poison') rather than guessed.
     if low == 'paralyzing bite':
+        desc = _ability_description(raw_name)
+        m = re.search(r'save\s+(?:vs\.?|versus)\s+(\w+)', desc or '', re.I)
+        save = m.group(1).lower() if m else 'none'
         return [_make_action_group('Paralyzing Bite', _FOUNDRY_ICON_DEFAULT, [
             _make_action('Bite Attack', type_='melee', img=_FOUNDRY_ICON_DEFAULT,
-                         targeting='single', speed=4),
-            _make_action('Damage', type_='damage', img=_FOUNDRY_ICON_DEFAULT,
-                         targeting='single', formula='1d4', damage_type='piercing'),
+                         targeting='single'),
             _make_action('Paralysis Save', type_='effect', img=_FOUNDRY_ICON_DEFAULT,
-                         targeting='single', save_type='paralyzation',
+                         targeting='single', save_type=save,
                          effect_changes=[{
                              'key':'special.status', 'type':'custom',
                              'value':'paralysis', 'priority':20,
                              'phase':'initial'}]),
         ])]
 
-    # ── Charge Attack: cast + damage at 2x speed; standard SP charge rule
+    # ── Charge Attack: a clickable melee action. The +N to-hit and "double
+    # damage" are described in the item text but ARS actions carry no to-hit-
+    # modifier field, so no fabricated damage formula is emitted here.
     if low == 'charge attack':
         return [_make_action_group('Charge Attack', _FOUNDRY_ICON_DEFAULT, [
             _make_action('Charge (move + attack)', type_='melee',
-                         img=_FOUNDRY_ICON_DEFAULT, targeting='single', speed=0),
-            _make_action('Charge Damage', type_='damage',
-                         img=_FOUNDRY_ICON_DEFAULT, targeting='single',
-                         formula='2', damage_type=''),
+                         img=_FOUNDRY_ICON_DEFAULT, targeting='single'),
         ])]
 
     # ── Leap (Thri-kreen / others): single-use movement burst
@@ -3093,7 +3167,12 @@ def _load_ability_descriptions():
     if _ability_desc_cache is not None:
         return _ability_desc_cache
     out = {}
-    for base in ('Dwarf','Elf','Gnome','Halfling'):
+    # Order matters: _add_ability_desc is keep-first, so the four core
+    # demihuman pages win for shared labels (e.g. the elf's Cold/Heat
+    # resistance text). The half-races are appended only to supply labels
+    # the core four lack — notably Half-Ogre's "Poison resistance".
+    for base in ('Dwarf','Elf','Gnome','Halfling',
+                 'Half-elf','Half-orc','Half-ogre'):
         for label, html in _parse_sp_lineage_abilities_section(_SP_DEMIHUMAN_FILES[base]):
             _add_ability_desc(out, label, html)
     for rel in _SP_ABILITY_LEGEND_FILES:
@@ -5267,31 +5346,37 @@ _SPELL_ICON_INDEX = {
 # from their page title (typo). Without this the name lookup fails and the spell
 # would be dropped (migrate_spells drops description-less spells). Text read at
 # runtime from the user's CD-ROM.
+# Per-spell HTM-page overrides for records whose DAT name doesn't match any
+# page title — typos, missing words, cross-book spells (MM monster pages, S&M),
+# or empty <TITLE>. Keys are CURRENT SPELLS.DAT indices; like the reverse-index
+# tables they must be recalibrated whenever spell-record parsing shifts (the
+# casting-time field-shift fix desynced them, silently dropping these spells AND
+# feeding wrong descriptions to the records that landed on the stale indices).
 _SPELL_DESC_HTM_INDEX = {
-    28:  'PHB/PHB00433.HTM',
-    327: 'TOM/TOM00067.HTM',
-    743: 'TOM/TOM00169.HTM',
+    28:  'PHB/PHB00433.HTM',   # Nystul's Magical Aura (wizard L1)
+    328: 'TOM/TOM00067.HTM',   # Maximilian's Stony Grasp — HTM "Stoney" (wizard L3)
+    745: 'TOM/TOM00169.HTM',   # Create Campsite/Break Camp (priest L3)
     # Call Phoenix is embedded in the Phoenix monster page (MM) — anchor to spell section.
-    918: ('MM/MM00240.HTM', 'Call Phoenix'),
+    920: ('MM/MM00240.HTM', 'Call Phoenix'),
     # HTM title is "Chariot Sustarre" (missing "of") — bypass name lookup.
-    528: 'PHB/PHB00871.HTM',
+    529: 'PHB/PHB00871.HTM',
     # HTM title has no space after comma: "Control Temperature,10' Radius" vs DAT "10-foot".
-    646: 'PHB/PHB00802.HTM',
+    648: 'PHB/PHB00802.HTM',
     # Create/Destroy Crypt Thing (wizard + priest) — embedded in the Crypt Thing monster page.
-    453: ('MM/MM00043.HTM', 'Create Crypt Thing'),
-    454: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
-    914: ('MM/MM00043.HTM', 'Create Crypt Thing'),
-    915: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
+    454: ('MM/MM00043.HTM', 'Create Crypt Thing'),
+    455: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
+    916: ('MM/MM00043.HTM', 'Create Crypt Thing'),
+    917: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
     # HTM title "Dimension Blade" (missing "al") — bypass name lookup.
-    416: 'SM/SM00285.HTM',
+    417: 'SM/SM00285.HTM',
     # DAT typo "Enegry Drain" — PHB page title is correct "Energy Drain".
-    910: 'PHB/PHB00700.HTM',
+    912: 'PHB/PHB00700.HTM',
     # HTM title "Persistance" (missing 'e') — bypass name lookup.
-    423: 'SM/SM00292.HTM',
-    # SM00336 has an empty <TITLE> — bypass name lookup.
-    854: 'SM/SM00336.HTM',
+    424: 'SM/SM00292.HTM',
+    # SM00336 (Recitation) has an empty <TITLE> — bypass name lookup.
+    856: 'SM/SM00336.HTM',
     # DAT "Summon" maps to "Summon Animal Spirit" page (title singular vs DAT generic name).
-    912: 'SM/SM00326.HTM',
+    914: 'SM/SM00326.HTM',
 }
 
 _spell_records_cache = None
@@ -5368,17 +5453,22 @@ def _spell_description_from_path(rel):
 #                                 Dismiss X→Conjure Fire …): feed ONLY the HTM
 #                                 lookup; they must NOT auto-chain as children.
 # Pairs whose reverse isn't a distinct DAT record are omitted (nothing to link).
+# Indices recalibrated to the current SPELLS.DAT parser (record count 933).
+# These shift whenever spell record parsing changes (e.g. the casting-time
+# field-shift fix added records, desyncing the original v0.1 indices and
+# silently dropping the reverses). _build_reverse_maps() now asserts each pair
+# shares class+level at runtime and warns loudly if a future shift recurs.
 _SPELL_REVERSE_INDEX = [
-    (430, 439), (431, 438), (432, 440), (433, 46), (434, 50), (437, 66),
-    (441, 109), (443, 154), (447, 196), (475, 389), (870, 579), (871, 479),
-    (872, 546), (874, 23), (876, 482), (877, 505), (878, 533), (889, 508),
-    (890, 581), (891, 538), (896, 559), (899, 583), (900, 629), (901, 592),
-    (903, 237), (906, 584), (909, 521), (884, 588), (885, 589),
+    (431, 440), (432, 439), (433, 441), (434, 46), (435, 50), (438, 66),
+    (442, 109), (444, 154), (448, 197), (476, 390), (872, 581), (873, 480),
+    (874, 548), (876, 639), (878, 483), (879, 506), (880, 534), (891, 509),
+    (892, 583), (893, 539), (898, 561), (901, 585), (902, 631), (903, 594),
+    (905, 546), (908, 586), (911, 522), (886, 590), (887, 591),
+    (477, 237), (924, 570),  # Improved Create Water <- Transmute Water to Dust (wiz, priest)
 ]
 _SPELL_LOOKUP_REDIRECT_INDEX = [
-    (409, 85), (435, 84), (436, 50), (442, 118), (444, 892), (471, 473),
-    (472, 473), (476, 546), (881, 50), (904, 473), (907, 473), (908, 559),
-    (929, 473), (930, 473),
+    (410, 85), (436, 84), (437, 50), (443, 118), (472, 474), (473, 474),
+    (883, 482), (906, 566), (909, 566), (910, 561), (931, 566), (932, 566),
 ]
 _reverse_maps_cache = None
 def _build_reverse_maps():
@@ -5392,13 +5482,35 @@ def _build_reverse_maps():
     recs = _spell_records()
     def nm(i):
         return recs[i]['name'].strip().lower() if 0 <= i < len(recs) else None
+    def _consistent(ri, pi):
+        # A reversible and its primary share class_type and level. If they don't,
+        # the hard-coded indices have desynced from the parser (record count
+        # changed) — warn loudly so the desync is caught, never silently dropped.
+        if not (0 <= ri < len(recs) and 0 <= pi < len(recs)):
+            return False
+        a, b = recs[ri], recs[pi]
+        ok = (a.get('class_type') == b.get('class_type')
+              and a.get('level') == b.get('level'))
+        if not ok:
+            print(f"  ⚠ reverse-index desync: {a.get('name')!r} (idx {ri}) vs "
+                  f"{b.get('name')!r} (idx {pi}) — recalibrate _SPELL_*_INDEX")
+        return ok
     rev2prim, prim2rev = {}, {}
     for ri, pi in _SPELL_REVERSE_INDEX:        # true reversibles → both directions
+        if not _consistent(ri, pi): continue
         r, p = nm(ri), nm(pi)
         if r and p:
             rev2prim.setdefault(r, p)
             prim2rev.setdefault(p, r)
     for ri, pi in _SPELL_LOOKUP_REDIRECT_INDEX:  # variants → lookup direction only
+        # lookup redirects may legitimately cross level (variant → base spell),
+        # so only require the same class_type here.
+        if not (0 <= ri < len(recs) and 0 <= pi < len(recs)
+                and recs[ri].get('class_type') == recs[pi].get('class_type')):
+            if 0 <= ri < len(recs):
+                print(f"  ⚠ lookup-redirect desync at idx {ri} "
+                      f"({recs[ri].get('name')!r}) — recalibrate _SPELL_*_INDEX")
+            continue
         r, p = nm(ri), nm(pi)
         if r and p:
             rev2prim.setdefault(r, p)
@@ -7014,7 +7126,6 @@ def _race_abilities_for(race):
          sensible default rather than no vision configuration at all).
       2. Movement is emitted as feet/round (the DAT value × 10), matching
          the AD&D 2e PHB convention where "MV 12" means 120 ft/round."""
-    movement = race.get('movement')
     runtime  = extract_race_runtime_data(race['name'])
     infravision_ft       = runtime['infravision_ft']
     extracted_abilities  = runtime['abilities']
@@ -7026,18 +7137,10 @@ def _race_abilities_for(race):
         seen_labels.add(label)
         out.append((label, icon, changes))
 
-    # Race-specific stat mod (always unique to the race name → never shared)
-    stat_changes = make_race_stat_mod_changes(race.get('ability_adjustments'))
-    if stat_changes:
-        _push(f"{race['name']} Racial Ability Modifiers",
-              _FOUNDRY_ICON_RACEMOD, stat_changes)
-
-    if movement is not None:
-        movement_ft = movement * 10     # PHB "MV 12" → 120 ft/round
-        _push(f"Base Movement {movement_ft}",
-              pick_race_ability_icon("Base Movement"),
-              [{"key": "system.mods.movement.base", "type": "override",
-                "value": str(movement_ft), "priority": 20, "phase": "initial"}])
+    # NOTE: the baseline traits every race carries (ability-score modifiers +
+    # movement) are NOT emitted here — they go DIRECTLY on the race document
+    # via _race_direct_effect_specs(). Abilities surfaced here are the *special*
+    # racial traits a player should see as named items.
 
     has_infravision = False
     for lab in extracted_abilities:
@@ -7058,6 +7161,86 @@ def _race_abilities_for(race):
               [_vision_effect_change(0)])
 
     return out
+
+
+def _race_direct_effect_specs(race):
+    """Baseline traits every race carries — ability-score modifiers and base
+    movement — placed DIRECTLY on the race document (not surfaced as named
+    ability items). Returns [(label, icon, changes), ...]. Per design: direct
+    = the universal stat package; abilities = what is *special* about a race."""
+    out = []
+    stat_changes = make_race_stat_mod_changes(race.get('ability_adjustments'))
+    if stat_changes:
+        out.append((f"{race['name']} Racial Ability Modifiers",
+                    _FOUNDRY_ICON_RACEMOD, stat_changes))
+    movement = race.get('movement')
+    if movement is not None:
+        movement_ft = movement * 10     # PHB "MV 12" → 120 ft/round
+        out.append((f"Base Movement {movement_ft}",
+                    pick_race_ability_icon("Base Movement"),
+                    [{"key": "system.mods.movement.base", "type": "override",
+                      "value": str(movement_ft), "priority": 20,
+                      "phase": "initial"}]))
+    return out
+
+
+# A racial weapon attack bonus reads as "+N ... attack ... with <weapon>"
+# (e.g. dwarf/gnome "+1 to attack rolls with darts"). Implemented as OSRIC does:
+# a `proficiency` item whose system.hit carries the bonus, added to the race
+# itemList — NOT a flat actor effect (which would hit every weapon).
+# The weapon clause must follow the attack word closely (bounded gap): this
+# matches "+1 to attack rolls with darts" but NOT charge-style prose like
+# "+2 bonus to attack and inflicting double damage with an impaling weapon".
+_WEAPON_ATTACK_BONUS_RE = re.compile(
+    r'\+\s*(\d+)\b[^.]{0,30}?\b(?:attacks?|to\s+hit|missile)\b[^.]{0,12}?\bwith\s+'
+    r'([^.]+?)(?:\.|,|—|$)', re.I)
+
+
+def _weapon_attack_bonus_from_label(label):
+    """(bonus, weapon_name) parsed from a racial ability's description when it
+    is a weapon attack bonus, else None. Weapon-, bonus-, and label-agnostic:
+    all values come from the user's source text at runtime."""
+    desc = _ability_description(label)
+    if not desc:
+        return None
+    m = _WEAPON_ATTACK_BONUS_RE.search(desc)
+    if not m:
+        return None
+    weapon = re.sub(r'\s+', ' ', m.group(2)).strip().rstrip('.').strip()
+    weapon = re.split(r',|\btheir\b|\bas\b|\bwhich\b', weapon)[0].strip()
+    if not weapon:
+        return None
+    return m.group(1), weapon
+
+
+def _make_race_weapon_prof_item(name, hit, description, icon):
+    """Minimal `proficiency` item carrying a racial weapon attack bonus in
+    system.hit — mirrors OSRIC's "H: Bow Attack Bonus" shape (appliedto empty,
+    proficiencies.cost 0)."""
+    return {
+        "_id": make_id(), "name": name, "type": "proficiency", "img": icon,
+        "effects": [],
+        "system": {
+            "description": description, "dmonlytext": "", "itemList": [],
+            "appliedto": [], "cost": 0,
+            "hit": str(hit), "damage": "0", "speed": 0, "attacks": "",
+            "migrate": False,
+            "attributes": {"rarity": "", "type": "", "subtype": "",
+                           "magic": False, "properties": [], "skillmods": [],
+                           "conditionals": [], "identified": True,
+                           "infiniteammo": False, "size": "medium",
+                           "material": "leather_book"},
+            "charges": {"value": 0, "min": 0, "max": 0, "reuse": "none"},
+            "location": {"state": "carried", "parent": ""},
+            "resource": {"itemId": ""},
+            "quantity": 0, "weight": 0, "source": "", "xp": 0,
+            "actions": [], "actionGroups": [],
+            "proficiencies": {"cost": 0},
+            "rank": {"levels": {"max": 0, "arcane": 0, "divine": 0}},
+        },
+        "folder": None, "sort": 0, "ownership": {"default": 0},
+        "flags": {}, "_stats": _stats_block(),
+    }
 
 
 # ─── Skill spec generator + per-race skill enumeration ───────────────────────
@@ -7143,25 +7326,25 @@ def _race_skill_specs(race):
             'description': '', 'icon': _FOUNDRY_ICON_SKILL_MINING,
         })
 
-    # 4. Secret doors: elf/half-elf/halfling get 3 elf-style skills
-    #    (passing 1d6≤1, searching secret 1d6≤2, searching concealed
-    #    1d6≤3 — PHB elf entry and S&P SP00025); every other lineage
-    #    gets the universal "Detect Secret Doors" 1d6 ≤ 1 skill.
-    if base in ('Elf','Half-elf','Halfling'):
-        prefix = base
-        out.append({'name': f'{prefix}: Passing Secret Doors',
-                    'formula':'1d6','target':1,'type':'decending','groups':'',
-                    'description':'','icon':_FOUNDRY_ICON_SKILL_SECRET})
-        out.append({'name': f'{prefix}: Searching Secret Doors',
-                    'formula':'1d6','target':2,'type':'decending','groups':'',
-                    'description':'','icon':_FOUNDRY_ICON_SKILL_SECRET})
-        out.append({'name': f'{prefix}: Searching Concealed Doors',
-                    'formula':'1d6','target':3,'type':'decending','groups':'',
-                    'description':'','icon':_FOUNDRY_ICON_SKILL_SECRET})
-    else:
-        out.append({'name':'Detect Secret Doors',
-                    'formula':'1d6','target':1,'type':'decending','groups':'',
-                    'description':'','icon':_FOUNDRY_ICON_SKILL_SECRET})
+    # 4. Secret doors: elf/half-elf/halfling get the elf-style detection
+    #    skills; every other lineage gets the universal "Detect Secret Doors".
+    #    The die and success target for each are parsed from the PHB Elf entry
+    #    at runtime (the three 'roll a … on 1dN' chances, in source order) —
+    #    never hardcoded. If the source can't be read, no skill is fabricated.
+    chances = _parse_secret_door_chances()
+    if chances:
+        def _door(name, die, target):
+            return {'name': name, 'formula': f'1d{die}', 'target': target,
+                    'type': 'decending', 'groups': '', 'description': '',
+                    'icon': _FOUNDRY_ICON_SKILL_SECRET}
+        if base in ('Elf', 'Half-elf', 'Halfling'):
+            labels = ['Passing Secret Doors', 'Searching Secret Doors',
+                      'Searching Concealed Doors']
+            for lab, (die, target) in zip(labels, chances):
+                out.append(_door(f'{base}: {lab}', die, target))
+        else:
+            die, target = chances[0]      # universal = the 'passing' chance
+            out.append(_door('Detect Secret Doors', die, target))
 
     return out
 
@@ -7204,38 +7387,59 @@ def migrate_races():
     skills_root             = _folder('Racial Skills',                       sort=300000)
 
     # ── 2. First pass: enumerate every race's ability tuples ───────────────
+    # Sharing is keyed on a CASE-INSENSITIVE label so sub-race tables that spell
+    # the same ability differently (e.g. "Secret Doors" vs "Secret doors") share
+    # ONE doc instead of minting duplicates. `norm_display` keeps the nicest
+    # (most-capitalised) spelling as the canonical name.
+    def _ability_key(lab):
+        return ' '.join(lab.strip().lower().split())
     race_abilities = []   # [(race_dict, [(label, icon, changes), ...])]
-    label_count    = {}   # label → number of races emitting it
+    label_count    = {}   # normalized-label → number of races emitting it
+    norm_display   = {}   # normalized-label → canonical display name
     for race in races:
         abs_ = _race_abilities_for(race)
         race_abilities.append((race, abs_))
         for (lab, _, __) in abs_:
-            label_count[lab] = label_count.get(lab, 0) + 1
+            # Weapon attack bonuses become proficiency items (per race); the
+            # descriptive "Melee combat …" label is merged into the single
+            # per-race combat ability below — neither is a shared ability.
+            if _weapon_attack_bonus_from_label(lab):
+                continue
+            if 'melee combat' in lab.lower():
+                continue
+            key = _ability_key(lab)
+            label_count[key] = label_count.get(key, 0) + 1
+            cur = norm_display.get(key)
+            if cur is None or (sum(c.isupper() for c in lab)
+                               > sum(c.isupper() for c in cur)):
+                norm_display[key] = lab.strip()
 
     # ── 3. Second pass: mint shared ability docs once, per-race specifics inline ──
     shared_doc_id = {}   # label → ability_doc_id  (lookup table for sharing)
     shared_pool_specs = []  # (label, icon, changes) for the eventually-shared ones
 
-    # Collect spec for each shared label using its first occurrence
+    # Collect spec for each shared normalized-label using its first occurrence
     seen_shared = set()
     for _race, abs_ in race_abilities:
         for (lab, icon, chg) in abs_:
-            if label_count[lab] >= 2 and lab not in seen_shared:
-                seen_shared.add(lab)
-                shared_pool_specs.append((lab, icon, chg))
+            key = _ability_key(lab)
+            if label_count.get(key, 0) >= 2 and key not in seen_shared:
+                seen_shared.add(key)
+                shared_pool_specs.append((key, icon, chg))
 
-    # Write the shared abilities (one Ability item per label, into the Shared folder)
+    # Write the shared abilities (one Ability item per normalized label, Shared folder)
     action_groups_written = 0
-    for (lab, icon, chg) in shared_pool_specs:
-        chg = chg or _ability_effect_changes(lab)
-        acts = _ability_actions(lab)
-        ab, ef = make_ability_item(lab, icon,
-                                   description=_ability_description(lab),
+    for (key, icon, chg) in shared_pool_specs:
+        disp = norm_display[key]
+        chg = chg or _ability_effect_changes(disp)
+        acts = _ability_actions(disp)
+        ab, ef = make_ability_item(disp, icon,
+                                   description=_ability_description(disp),
                                    effect_changes=chg,
                                    action_groups=(acts or None))
         if acts: action_groups_written += len(acts)
         ab['folder'] = shared_abilities_folder
-        shared_doc_id[lab] = ab['_id']
+        shared_doc_id[key] = ab['_id']
         db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
         if ef:
             db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
@@ -7292,16 +7496,41 @@ def migrate_races():
         bucket_folder = bucket_ids[bucket]
 
         item_list_refs = []
+        # Weapon attack bonuses → proficiency items (system.hit), OSRIC-style.
         for (lab, icon, chg) in abs_:
-            if lab in shared_doc_id:
-                ab_id = shared_doc_id[lab]
+            wb = _weapon_attack_bonus_from_label(lab)
+            if not wb:
+                continue
+            bonus, weapon = wb
+            prof = _make_race_weapon_prof_item(
+                f'{weapon.title()} Attack Bonus', bonus,
+                _ability_description(lab) or '', icon)
+            prof['folder'] = per_race_abilities_folder
+            db.put(f'!items!{prof["_id"]}'.encode(), json.dumps(prof).encode())
+            unique_abilities_written += 1
+            item_list_refs.append({
+                "id": prof['_id'], "uuid": f"Item.{prof['_id']}",
+                "sourceuuid": f"Compendium.{MODULE_ID}.adnd2-races.Item.{race_id}",
+                "type": "proficiency", "name": prof['name'], "img": prof['img'],
+                "level": "0",
+            })
+
+        for (lab, icon, chg) in abs_:
+            if _weapon_attack_bonus_from_label(lab):
+                continue   # already emitted as a proficiency item above
+            if 'melee combat' in lab.lower():
+                continue   # merged into the single combat ability below
+            key = _ability_key(lab)
+            disp = norm_display.get(key, lab.strip())
+            if key in shared_doc_id:
+                ab_id = shared_doc_id[key]
                 ab_img = icon
             else:
                 # Race-specific: mint a new Ability item now
-                chg = chg or _ability_effect_changes(lab)
-                acts = _ability_actions(lab)
-                ab, ef = make_ability_item(lab, icon,
-                                            description=_ability_description(lab),
+                chg = chg or _ability_effect_changes(disp)
+                acts = _ability_actions(disp)
+                ab, ef = make_ability_item(disp, icon,
+                                            description=_ability_description(disp),
                                             effect_changes=chg,
                                             parent_race_id=race_id,
                                             action_groups=(acts or None))
@@ -7320,7 +7549,7 @@ def migrate_races():
                 "uuid": f"Item.{ab_id}",
                 "sourceuuid": f"Compendium.{MODULE_ID}.adnd2-races.Item.{race_id}",
                 "type": "ability",
-                "name": lab,
+                "name": disp,
                 "img":  ab_img,
                 "level": "0",
             })
@@ -7341,6 +7570,40 @@ def migrate_races():
                 "level": "0",
             })
 
+        # ── Combat bonuses (dwarf/gnome to-hit + AC vs giant-kin) → ONE
+        # "Melee Combat Bonuses" ability carrying BOTH the S&P prose and the
+        # mechanical changes (target.type for the to-hit bonus, attacker.type
+        # for the AC bonus). This replaces the earlier redundant split of a
+        # descriptive-only "Melee Combat Bonuses" + effect-only "Racial
+        # Attack/Defensive Bonus" items. Magnitudes/triggers parsed at runtime.
+        combat_changes = [
+            c for cef in _build_race_combat_effect_docs(
+                race['name'], race_id, category_members=taxonomy_members)
+            for c in cef['system']['changes']]
+        if combat_changes:
+            melee_labels = [lab for (lab, _, _) in abs_
+                            if 'melee combat' in lab.lower()]
+            melee_desc = (_ability_description(melee_labels[0])
+                          if melee_labels else '')
+            ab, ef = make_ability_item(
+                'Melee Combat Bonuses',
+                pick_race_ability_icon('Melee Combat'),
+                description=melee_desc, effect_changes=combat_changes,
+                parent_race_id=race_id)
+            ab['folder'] = per_race_abilities_folder
+            db.put(f'!items!{ab["_id"]}'.encode(), json.dumps(ab).encode())
+            if ef:
+                db.put(f'!items.effects!{ab["_id"]}.{ef["_id"]}'.encode(),
+                       json.dumps(ef).encode())
+                effects_written += 1
+            unique_abilities_written += 1
+            item_list_refs.append({
+                "id": ab['_id'], "uuid": f"Item.{ab['_id']}",
+                "sourceuuid": f"Compendium.{MODULE_ID}.adnd2-races.Item.{race_id}",
+                "type": "ability", "name": 'Melee Combat Bonuses', "img": ab['img'],
+                "level": "0",
+            })
+
         race_item = make_race_item(
             race, img,
             description=description,
@@ -7351,17 +7614,19 @@ def migrate_races():
         )
         race_item['_id']    = race_id
         race_item['folder'] = bucket_folder
-        # Direct-on-race combat-bonus effects (dwarf/gnome to-hit + defensive
-        # vs giant-kin). Parsed from the PHB chapter at runtime; placed straight
-        # on the race doc like OSRIC's "Dwarf Attack Bonuses" etc.
-        combat_effects = _build_race_combat_effect_docs(
-            race['name'], race_id, category_members=taxonomy_members)
-        if combat_effects:
-            race_item['effects'] = [e['_id'] for e in combat_effects]
-            for ef in combat_effects:
-                db.put(f'!items.effects!{race_id}.{ef["_id"]}'.encode(),
-                       json.dumps(ef).encode())
-                effects_written += 1
+        # ── Baseline traits every race carries (ability-score modifiers + base
+        # movement) → placed DIRECTLY on the race document, like OSRIC's
+        # "Racial Ability Modifiers". The *special* traits are the abilities. ──
+        origin = f"Compendium.{MODULE_ID}.adnd2-races.Item.{race_id}"
+        direct_ids = []
+        for (lab, icon, chg) in _race_direct_effect_specs(race):
+            ef = _make_effect_doc(lab, icon, chg, origin, transfer=True,
+                                  description=_ability_description(lab))
+            db.put(f'!items.effects!{race_id}.{ef["_id"]}'.encode(),
+                   json.dumps(ef).encode())
+            direct_ids.append(ef['_id'])
+            effects_written += 1
+        race_item['effects'] = direct_ids
         written_race_docs[race['name']] = race_item
         db.put(f'!items!{race_id}'.encode(), json.dumps(race_item).encode())
 
@@ -7402,6 +7667,22 @@ def migrate_races():
                   f'from the "{src["name"]} CP Abilities" folder.</em></p>\n'
                   f'<hr/>\n')
         cp_doc['system']['description'] = banner + (src['system'].get('description') or '')
+        # Re-embed the baseline direct effects (ability mods + movement) under
+        # the copy's OWN id — embedded effect docs are keyed by owner id, so the
+        # copied effects[] (pointing at the original race) would otherwise be
+        # dropped by the pack builder, leaving the CP race with no stat package.
+        cp_origin = f"Compendium.{MODULE_ID}.adnd2-races.Item.{cp_id}"
+        cp_eff_ids = []
+        race_dict = races_by_name.get(base)
+        if race_dict:
+            for (lab, icon, chg) in _race_direct_effect_specs(race_dict):
+                ef = _make_effect_doc(lab, icon, chg, cp_origin, transfer=True,
+                                      description=_ability_description(lab))
+                db.put(f'!items.effects!{cp_id}.{ef["_id"]}'.encode(),
+                       json.dumps(ef).encode())
+                cp_eff_ids.append(ef['_id'])
+                cp_effects_written += 1
+        cp_doc['effects'] = cp_eff_ids
         db.put(f'!items!{cp_id}'.encode(), json.dumps(cp_doc).encode())
         cp_races_written += 1
 
@@ -7934,21 +8215,22 @@ def _class_ability_effect_changes(name, lead_text=''):
                  'priority': 20, 'phase': 'initial', 'last': ''}]
 
     if 'saving throw bonus' in low:
-        # Parse the bonus magnitude from the PHB text at runtime
+        # Parse the bonus magnitude from the PHB text at runtime; emit nothing
+        # if it can't be read rather than fabricate a value.
         m = re.search(r'\+\s*(\d+)', lead_text)
-        bonus = m.group(1) if m else '1'
-        return _save(bonus)
+        return _save(m.group(1)) if m else []
 
     if 'fire' in low and ('electrical' in low or 'lightning' in low):
         m = re.search(r'\+\s*(\d+)', lead_text)
-        bonus = m.group(1) if m else '2'
-        return _save(bonus, 'fire,lightning')
+        return _save(m.group(1), 'fire,lightning') if m else []
 
     return []
 
 
-def _class_ability_action_groups(name):
-    """Build ARS action groups for class abilities with clickable mechanics."""
+def _class_ability_action_groups(name, text=''):
+    """Build ARS action groups for class abilities with clickable mechanics.
+    `text` is the ability's own source description; any numeric value (heal
+    per level, daily uses) is parsed from it at runtime, never hardcoded."""
     low = name.lower()
     icon = _class_ability_icon(name)
 
@@ -7959,21 +8241,29 @@ def _class_ability_action_groups(name):
         ])]
 
     if 'lay on hands' in low:
+        # Heal-per-level multiplier read from the text ('N hit points per
+        # level'); if absent we emit no fabricated formula.
+        mult = _parse_points_per_level(text)
+        formula = f'@rank.levels.max*{mult}' if mult else ''
         return [_make_action_group('Lay on Hands', icon, [
             _make_action('Heal', type_='heal', targeting='single', img=icon,
-                         formula='@rank.levels.max*2'),
+                         formula=formula,
+                         charges_per_day=_parse_per_day(text)),
         ])]
 
     if 'cure disease' in low:
         return [_make_action_group('Cure Disease', icon, [
             _make_action('Cure Disease', type_='use', targeting='single',
-                         img=icon, save_type='none'),
+                         img=icon, save_type='none',
+                         charges_per_day=_parse_per_day(text)),
         ])]
 
     if 'shapechange' in low:
+        # Daily-use count read from the text ('three times per day'); 0 = no
+        # stated limit rather than a hardcoded frequency.
         return [_make_action_group('Shapechange', icon, [
             _make_action('Shapechange', type_='use', targeting='self',
-                         img=icon, charges_per_day=3),
+                         img=icon, charges_per_day=_parse_per_day(text)),
         ])]
 
     if 'influence reactions' in low:
@@ -8250,7 +8540,7 @@ def _class_abilities_for(cls, class_descs):
         if not chg:
             chg = _class_ability_effect_changes(spec_name, lead)
         if not acts:
-            acts = _class_ability_action_groups(spec_name)
+            acts = _class_ability_action_groups(spec_name, f'{desc} {lead}')
         specs.append({
             'name':           spec_name,
             'description':    desc,
@@ -8543,8 +8833,8 @@ def migrate_classes():
                 cost_str  = m.group(2)       # e.g. "5", "5/10", "5+"
                 display   = f'{_title_case(raw_name)} ({cost_str} CP)'
                 icon      = _class_ability_icon(raw_name)
-                mech      = _class_ability_effect_changes(raw_name)
-                acts      = _class_ability_action_groups(raw_name)
+                mech      = _class_ability_effect_changes(raw_name, body_html)
+                acts      = _class_ability_action_groups(raw_name, body_html)
                 ab, ef    = make_ability_item(
                     display, icon,
                     description=body_html,
