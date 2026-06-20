@@ -2368,6 +2368,47 @@ def _item_magic_lookup_candidates(full_name):
     return [c.lower().strip() for c in candidates if c and len(c) > 3]
 
 
+def _item_dmg_magic_description(name):
+    """Tightened DMG lookup for magic 'item' records the generic chain misses
+    because of trailing variant qualifiers ("Ring of Wizardry, 3rd", "Boots of
+    Levitation, 448 lbs", "Pearl of Power, Cursed (8th)"). Strips the magic ±N
+    suffix, parentheticals and the trailing comma-clause, then matches the DMG
+    "X-- Magical Item"/"X-- Scroll" index — but only on a MULTI-WORD key, so a
+    misclassified "Sword, two-handed" never grabs the generic "sword" page.
+    Returns cleaned HTML or ''."""
+    idx = html_title_index('DMG', 'DMG')
+    base = re.sub(r'\s*[+-]\d.*$', '', name)
+    base = re.sub(r'\s*\(.*?\)\s*', ' ', base).strip()
+    cands = []
+    for c in (base, re.sub(r',\s*[^,]*$', '', base)):
+        c = ' '.join(c.lower().split())
+        if c and c not in cands:
+            cands.append(c)
+    # Protection scrolls: PARTS "Scroll of Protection from Cold" → the DMG page
+    # is titled "Protection from Cold-- Scroll" (indexed "protection from cold").
+    m = re.match(r'scroll of (.+)', base, re.I)
+    if m:
+        cands.append(' '.join(m.group(1).lower().split()))
+    for c in cands:
+        if len(c.split()) < 2:
+            continue
+        entry = idx.get(c)
+        if not entry:
+            continue
+        try:
+            if isinstance(entry, tuple):
+                fp, start, end = entry
+                src = {f.upper(): f for f in os.listdir(os.path.dirname(fp))}
+                raw = open(fp, 'r', encoding='cp1252').read()[start:end]
+                soup = BeautifulSoup(f'<html><body>{raw}</body></html>', 'html.parser')
+                return _clean_html_body(soup.find('body') or soup, soup, 'DMG', src)
+            src = {f.upper(): f for f in os.listdir(os.path.dirname(entry))}
+            return clean_html_file(entry, 'DMG', src)
+        except Exception:
+            return ''
+    return ''
+
+
 # ─── Race factual data (numeric stats from PHB 2e, ability labels) ───────────
 # Movement is in 6-second-round squares per PHB. Size category is the standard
 # AD&D 2e size. Ability names are short factual labels (no narrative text).
@@ -3622,15 +3663,21 @@ def _sp_legend_infravision_ft():
 def _make_action(name, type_='cast', *, img='', targeting='single',
                  save_type='none', save_formula='', formula='',
                  damage_type='', speed=0, charges_per_day=0,
-                 effect_changes=None, description=''):
+                 consume_item=False, effect_changes=None, description=''):
     """Build one ARS Action dict. Defaults work for a click-to-cast trigger
-    that posts a chat card. Override per pattern (see ARS_MECHANICS §3)."""
+    that posts a chat card. Override per pattern (see ARS_MECHANICS §3).
+    `consume_item` sets the OSRIC "drink/use one" resource (spends 1 of the
+    owning item — e.g. a potion — when the action fires)."""
     resource = {"type": "none", "itemId": "", "reusetime": "",
                 "count": {"cost": 0, "min": 0, "max": 0, "value": 0}}
     if charges_per_day > 0:
         resource = {"type": "charges", "itemId": "", "reusetime": "day",
                     "count": {"cost": 1, "min": 0, "max": charges_per_day,
                               "value": charges_per_day}}
+    elif consume_item:
+        resource = {"type": "item", "itemId": "", "reusetime": "",
+                    "count": {"cost": 1, "min": 0, "max": 1, "value": 0},
+                    "trackTime": 0}
     return {
         "id": make_id(), "sort": 0, "name": name, "img": img,
         "type": type_, "targeting": targeting, "successAction": "none",
@@ -4940,11 +4987,28 @@ def make_class_item(cls, description=''):
 _SIZE_NORMALIZE = {'T':'tiny','S':'small','M':'medium','L':'large','H':'huge','G':'gargantuan'}
 
 
+_DMG_CODE_MAP = {'B': 'bludgeoning', 'P': 'piercing', 'S': 'slashing'}
+
 def _ars_damage_type(dt):
     """Map a PARTS.DAT damage-type code to a valid ARS damage type. Multi-type
-    weapons (P/S) collapse to their first component; ARS stores a single type."""
-    return {'B': 'bludgeoning', 'P': 'piercing', 'S': 'slashing',
-            'P/S': 'piercing', 'B/P': 'bludgeoning', 'B/S': 'bludgeoning'}.get(dt, 'none')
+    weapons (P/S) collapse to their first component; ARS stores a single type
+    in `system.damage.type` (the others are offered as choice actions — see
+    `_weapon_damage_type_list`)."""
+    first = (dt or '').split('/')[0].strip()
+    return _DMG_CODE_MAP.get(first, _DMG_CODE_MAP.get(dt, 'none'))
+
+
+def _weapon_damage_type_list(dt):
+    """Split a PARTS.DAT damage-type code into its ordered list of ARS damage
+    types: 'P/S' → ['piercing','slashing'], 'B/S' → ['bludgeoning','slashing'],
+    'P' → ['piercing']. Used to offer a damage-type-choice action group for the
+    2e weapons that strike for either type at the wielder's option (issue #15)."""
+    out = []
+    for code in (dt or '').split('/'):
+        t = _DMG_CODE_MAP.get(code.strip())
+        if t and t not in out:
+            out.append(t)
+    return out
 
 
 # ── Item material / category classifiers ──────────────────────────────────────
@@ -5091,6 +5155,71 @@ def _ac_jewelry_protection(name):
     return (ptype, ac_bonus, save_bonus, aura_distance)
 
 
+# Treasure gems and art objects carry their value in the name — "Diamond
+# (5500 gp)", "Rhodochrosite (1 sp)" — while PARTS.DAT leaves cost_gp at 0.
+# Parse it out so these items aren't priceless. Copyright-clean: it reads a
+# number the user's own data already prints in the record name.
+_NAME_COST_RE = re.compile(r'\((\d[\d,]*)\s*(gp|sp|cp|ep|pp)\)', re.I)
+
+def _cost_from_name(name):
+    """(value:int, currency:str) parsed from a trailing '(N gp)' in the item
+    name, or None. Used only when PARTS.DAT gives no cost."""
+    m = _NAME_COST_RE.search(name or '')
+    if not m:
+        return None
+    return int(m.group(1).replace(',', '')), m.group(2).lower()
+
+
+# PARTS.DAT mixes Skills & Powers character-build data into the part list:
+# kit/trait records flagged "(CRE)", per-ability "purchase" rows (Class/Race +
+# ability + parenthesized character-point cost), racial dialects, secret
+# languages and follower grants. None are equipment — they carry no description,
+# weight, or real price — so they're excluded from the items pack. Copyright-
+# clean: only generic class/race words and structural markers are referenced.
+_NONITEM_CLASS_RACE = (
+    r'(?:Cleric|Druid|Priest|Fighter|Paladin|Ranger|Warrior|Thief|Rogue|Bard|'
+    r'Wizard|Mage|Abjurer|Conjurer|Diviner|Enchanter|Illusionist|Invoker|'
+    r'Necromancer|Transmuter|Specialist|Psionicist|Monk|Dwarf|Elf|Gnome|'
+    r'Halfling|Half-elf|Half-orc|Human|Multi-class)')
+_NONITEM_PATTERNS = [
+    re.compile(r'\(CRE\)\s*$'),                        # S&P kit/trait records
+    re.compile(r'\bdialect\b', re.I),                  # racial dialects
+    re.compile(r'secret language', re.I),
+    re.compile(r',\s*Followers?\s*\(\d+\)', re.I),     # follower grants
+    re.compile(r'^' + _NONITEM_CLASS_RACE + r',\s+.+\(-?\d+\)\s*$'),  # ability buys
+]
+
+def _is_non_item_part(name):
+    """True for PARTS.DAT records that are S&P character-build data, not gear."""
+    return any(p.search(name or '') for p in _NONITEM_PATTERNS)
+
+
+# Activated magic 'item' records that otherwise sit inert: consumables (used up
+# in one use) vs reusable devices. Each gets a single click-to-use action so the
+# sheet can actually trigger them (mirrors OSRIC, which actions ~all consumables).
+# The detailed per-item effect changes stay out of scope (hand-authored data).
+_ITEM_CONSUMABLE_RE = re.compile(
+    r'^(oil|dust|powder|elixir|philter|philtre|salve) of\b', re.I)
+_ITEM_SCROLL_RE = re.compile(r'^(scroll of\b|spell scroll\b|cursed scroll\b)', re.I)
+_ITEM_DEVICE_RE = re.compile(r'^(wand|staff|rod|horn) of\b', re.I)
+
+def _magic_item_action_group(name, img):
+    """A use-action group for an activated magic 'item' (None if not activated).
+    Consumables/scrolls spend one on use; wands/rods/horns are reusable."""
+    if _ITEM_CONSUMABLE_RE.search(name):
+        label, consume = 'Use', True
+    elif _ITEM_SCROLL_RE.search(name):
+        label, consume = 'Read', True
+    elif _ITEM_DEVICE_RE.search(name):
+        label, consume = 'Activate', False
+    else:
+        return None
+    icon = img or 'icons/svg/item-bag.svg'
+    return _make_action_group(label, icon, [
+        _make_action(label, type_='use', targeting='self', img=icon,
+                     consume_item=consume)])
+
+
 def make_part_item(part, img_path=None, base_weapons=None):
     """Generate a Foundry/ARS Item from a parsed PART record, in the OSRIC
     2026.05.20 schema. Type inference: potion by name, weapon if it has a damage
@@ -5159,6 +5288,22 @@ def make_part_item(part, img_path=None, base_weapons=None):
             description = lookup_html_description(dmg_cand, _ITEM_DMG_BOOKS)
             if description:
                 break
+    # Final fallback for weapons/armor: the C&T Weapon/Armor Description glossaries
+    # (CT00375 / CT00378), which cover the exotic & historical gear the PHB/DMG/AEG
+    # omit. Matches the weapon/armor type by contiguous phrase (so a magic variant
+    # like "plate mail of blending +1" picks the *plate mail* entry, and a category
+    # match like "Sword." backstops base/unmatched items).
+    if not description and ftype in ('weapon', 'armor'):
+        description = _ct_item_description(part['name'], ftype)
+    # Magic 'item' records (rings, amulets, boots, bags…) whose trailing variant
+    # qualifier defeated the generic DMG lookup above.
+    if not description and ftype == 'item':
+        description = _item_dmg_magic_description(part['name'])
+    # Potions: their own DMG glossary page ("<Type>-- Potion").
+    if ftype == 'potion' and not description:
+        p_desc, _ = _potion_description_and_heal(part['name'])
+        if p_desc:
+            description = p_desc
 
     system = {
         "description": description, "dmonlytext": "", "itemList": [], "alias": "",
@@ -5171,29 +5316,78 @@ def make_part_item(part, img_path=None, base_weapons=None):
         "cost": {"value": part.get('cost_gp', 0), "currency": "gp"},
         "source": "", "xp": 0,
     }
+    # Gems / art objects price themselves in the name. This wins over cost_gp:
+    # the DAT cost is a single byte, so values >255 wrap (Art Object 300 gp →
+    # byte 44); the name carries the true, untruncated value.
+    nc = _cost_from_name(part['name'])
+    if nc:
+        system["cost"] = {"value": nc[0], "currency": nc[1]}
 
     if ftype == 'weapon':
         rof = part.get('rof')
         per_round = f"{rof['num']}/{rof['den']}" if rof else "1/1"
+        # Launcher weapons (bows/crossbows/slings/blowgun/arquebus) attack at
+        # range; everything else defaults to melee. Thrown melee weapons
+        # (dagger, spear, …) stay "melee" — we model a single item, not a
+        # separate thrown profile. Range bands come from PHB Table 45 at runtime.
+        is_ranged = bool(_RANGED_WEAPON_RE.search(part['name']))
+        attack_range = (_missile_range_for(part['name']) if is_ranged else None) \
+            or {"short": "", "medium": "", "long": ""}
         system["attack"] = {
             "speed": part.get('speed', 0),
-            "type": "melee",
+            "type": "ranged" if is_ranged else "melee",
             "perRound": per_round,
             "modifier": 0, "magicBonus": magic_bonus, "magicPotency": 0,
-            "range": {"short": "", "medium": "", "long": ""},
+            "range": attack_range,
             "primary": False, "speedmod": "",
         }
+        dmg_code = part.get('damage_type', '')
+        dmg_types = _weapon_damage_type_list(dmg_code)
+        dmg_normal = part.get('dmg_normal')
+        dmg_large  = part.get('dmg_large')
+        # Multi-type 2e weapons (P/S polearms, throwing knife, B/S clubs) are
+        # stored with no dice in PARTS.DAT — fill them from the rulebook tables
+        # so the base damage roll (and the per-type choice actions below) work.
+        # PHB Table 44 first (exact for the standard polearms), then the more
+        # complete C&T Master Weapons Table for the exotic weapons the PHB omits
+        # (stone axe, no-dachi, mace-axe, spade, scythe, bill). Limited to
+        # multi-type weapons to avoid mis-assigning melee dice to launchers.
+        if len(dmg_types) > 1 and not dmg_normal:
+            for _dice_src in (_phb_weapon_dice, _ct_weapon_dice):
+                src_n, src_l = _dice_src(part['name'])
+                if src_n:
+                    dmg_normal = src_n
+                    if not dmg_large:
+                        dmg_large = src_l
+                    break
         system["damage"] = {
-            "type": _ars_damage_type(part.get('damage_type', '')),
-            "normal": part.get('dmg_normal', "0"),
-            "large":  part.get('dmg_large', "0"),
+            "type": _ars_damage_type(dmg_code),
+            "normal": dmg_normal or "0",
+            "large":  dmg_large or "0",
             "otherdmg": [], "modifier": 0, "magicBonus": magic_bonus,
         }
         system["weaponstyle"] = ""
         # Weapon has a top-level system.size (schema initial "medium") in addition
         # to attributes.size; set it so non-medium weapons don't all read medium.
         system["size"] = size
+        # Damage-type choice (issue #15): a 2e weapon that strikes for either of
+        # two types (e.g. hook fauchard P/S) keeps its primary type in
+        # system.damage.type and offers one click-to-roll damage action per type
+        # (same dice) so the player picks the type that bypasses a resistance.
+        # ARS has no native "either/or" damage field; OSRIC drops the second type
+        # entirely, so this is new ground but valid action schema.
         system["actionGroups"] = []
+        if len(dmg_types) > 1 and dmg_normal:
+            _dmg_icon = 'systems/ars/icons/general/DamageColor.png'
+            choice_actions = [
+                _make_action(t.capitalize(), type_='damage', targeting='single',
+                             formula=dmg_normal, damage_type=t, img=_dmg_icon)
+                for t in dmg_types
+            ]
+            system["actionGroups"] = [
+                _make_action_group('Damage (type choice)', _dmg_icon,
+                                   choice_actions)
+            ]
     effect_docs = []
     if ftype == 'armor':
         dat_ac = part.get('armor_class', 10)
@@ -5241,6 +5435,31 @@ def make_part_item(part, img_path=None, base_weapons=None):
             }
         system["armorstyle"] = ""
         system["actionGroups"] = []
+
+    # Every potion gets a "Quaff" action group so it's actually usable from the
+    # sheet instead of sitting inert until drunk (OSRIC gives 88/89 potions a
+    # use action). A `use` action drinks-and-consumes one potion (resource type
+    # "item"); heal/damage actions are added when the description text states the
+    # dice. The richer per-effect changes (Giant Strength → STR, etc.) are
+    # hand-authored game data in OSRIC and remain out of scope.
+    if ftype == 'potion':
+        quaff_icon = img_path or 'icons/svg/item-bag.svg'
+        quaff_actions = [_make_action('Drink', type_='use', targeting='self',
+                                      img=quaff_icon, consume_item=True)]
+        quaff_actions += _mechanic_actions(description, part['name'])
+        system["actionGroups"] = [_make_action_group('Quaff', quaff_icon,
+                                                     quaff_actions)]
+    # Other activated magic items (oils, scrolls, wands, dust, horns…) get a
+    # use/activate action, plus heal/damage actions parsed from their text.
+    if ftype == 'item':
+        extra = _mechanic_actions(description, part['name'])
+        _mag_ag = _magic_item_action_group(part['name'], img_path)
+        if _mag_ag:
+            _mag_ag['actions'].extend(extra)
+            system["actionGroups"] = [_mag_ag]
+        elif extra:
+            system["actionGroups"] = [_make_action_group(
+                'Use', img_path or 'icons/svg/item-bag.svg', extra)]
 
     flags = {"adnd2": {"partId": part.get('item_id')}}
     if part.get('restricted_classes'):
@@ -8490,8 +8709,15 @@ def _load_weapon_specialization_data():
 
     melee_atk = melee_dmg = bow_atk = 0
     melee_cost = bow_cost = 0
+    bow_pb = None      # bow point-blank distance band (min, max) — sourced below
     eff_path  = os.path.join(phb_dir, 'PHB00127.HTM')
     cost_path = os.path.join(phb_dir, 'PHB00126.HTM')
+    # Number words that appear in the point-blank prose ("six feet to 30 feet").
+    _NUMWORD = {'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+                'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10}
+    def _num(tok):
+        tok = tok.strip().lower()
+        return int(tok) if tok.isdigit() else _NUMWORD.get(tok)
     if os.path.exists(eff_path):
         with open(eff_path, encoding='latin-1') as fh:
             eff_text = ' '.join(BeautifulSoup(fh.read(), 'html.parser').get_text(' ').split())
@@ -8501,6 +8727,16 @@ def _load_weapon_specialization_data():
         if m: melee_dmg = int(m.group(1))
         m = re.search(r'gains a \+(\d+) modifier on attack rolls', eff_text)
         if m: bow_atk = int(m.group(1))
+        # Point-blank range band for bows, e.g. "...for bows is from six feet to
+        # 30 feet." Both bounds (and the +2) are PHB rules data, so they are read
+        # from the file at runtime — never hardcoded. Used to gate the bow
+        # specialization attack bonus to point-blank range via a conditional.
+        m = re.search(r'point[- ]blank range for bows is from\s+(\w+)\s+feet'
+                      r'\s+to\s+(\w+)\s+feet', eff_text, re.I)
+        if m:
+            lo, hi = _num(m.group(1)), _num(m.group(2))
+            if lo is not None and hi is not None:
+                bow_pb = (lo, hi)
     if os.path.exists(cost_path):
         with open(cost_path, encoding='latin-1') as fh:
             cost_text = ' '.join(BeautifulSoup(fh.read(), 'html.parser').get_text(' ').split())
@@ -8519,6 +8755,7 @@ def _load_weapon_specialization_data():
         'bow_atk':     bow_atk,
         'melee_cost':  melee_cost,
         'bow_cost':    bow_cost,
+        'bow_pb':      bow_pb,
     }
 
 
@@ -8895,7 +9132,11 @@ def migrate_items():
                    'potion': 'Potions', 'item': 'Other Items'}
     count = 0
     effects_written = 0
+    skipped_nonitem = 0
     for part in parts:
+        if _is_non_item_part(part['name']):   # S&P build data, not equipment
+            skipped_nonitem += 1
+            continue
         img = extract_equip_icon(part.get('icon_id'), OUTPUT_IMG_ITEMS)
         item, item_effects = make_part_item(part, img, base_weapons=base_weapons)
         bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
@@ -8911,7 +9152,8 @@ def migrate_items():
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
-    print(f"  → {count} items in {len(folders)} folders ({effects_written} AC effects)")
+    print(f"  → {count} items in {len(folders)} folders ({effects_written} AC effects)"
+          f"; skipped {skipped_nonitem} non-equipment S&P build records")
     return count
 
 
@@ -9364,6 +9606,410 @@ def _load_phb_weapons_table():
         })
     _phb_weapons_cache = out
     return out
+
+
+_phb_weapon_dice_cache = None
+def _phb_weapon_dice(name):
+    """Best-effort (normal, large) damage dice for a weapon from PHB Table 44
+    (PHB00219), or (None, None). Fills dice the binary PARTS.DAT leaves unparsed
+    — notably every P/S polearm (halberd, hook fauchard, …) reads as 0 damage in
+    the DAT. Matching strips our 'Polearm,'/'Sword,' prefix, the magic ±N suffix,
+    and folds the DAT 'volge' misspelling to 'voulge'. Copyright-clean: the dice
+    are read from the user's PHB at runtime, never hardcoded."""
+    global _phb_weapon_dice_cache
+    if _phb_weapon_dice_cache is None:
+        _phb_weapon_dice_cache = {}
+        for r in _load_phb_weapons_table():
+            _phb_weapon_dice_cache[_phb_weapon_dice_key(r['name'])] = \
+                (r['dmg_sm'], r['dmg_l'])
+    key = _phb_weapon_dice_key(name)
+    hit = _phb_weapon_dice_cache.get(key)
+    if not hit:
+        # Token-subset fallback: a table row whose words are all present in the
+        # weapon name, most specific (longest) winning — so 'Knife, throwing' and
+        # 'Club, war' match the 'knife'/'club' rows that an exact/suffix match
+        # would miss (base noun is first, not last).
+        itoks = set(key.split())
+        best_n = 0
+        for tk, dice in _phb_weapon_dice_cache.items():
+            ttoks = set(tk.split())
+            if ttoks and ttoks <= itoks and len(ttoks) > best_n:
+                hit, best_n = dice, len(ttoks)
+    return hit or (None, None)
+
+def _phb_weapon_dice_key(name):
+    n = (name or '').lower()
+    n = re.sub(r'\s*[+-]\d+.*$', '', n)        # magic suffix
+    n = re.sub(r'^polearm,\s*', '', n)          # our PARTS prefix
+    n = n.replace('volge', 'voulge')            # DAT misspelling
+    n = re.sub(r'[^a-z0-9 ]', ' ', n)
+    return ' '.join(n.split())
+
+
+# ── Combat & Tactics Master Weapons Table (CT00374) — dice fallback ──────────
+# Far more complete than PHB Table 44: covers exotic/primitive weapons (stone
+# axe, no-dachi, spade, scythe, …) the PHB omits. Its hierarchy is category →
+# variant, shown by a 3-space indent on the variant's name cell ("Axe" header,
+# then "   Battle"/"   Stone"). We rebuild the full identity (category + variant)
+# from that indent so "Stone" under "Axe" resolves to our PARTS "Axe, stone".
+# Damage lives in the last-3 / last-2 columns (Sm-Med / Large) — robust across
+# the table's 3 sub-tables, which differ in column count. Copyright-clean: dice
+# read from the user's CT files at runtime.
+_CT_DICE_RE = re.compile(r'^\d+d\d+([+-]\d+)?$')
+_CT_FOOTNOTE_TOKENS = {'h', 's', 'm', 'b', 'k'}   # trailing superscript markers
+
+def _ct_name_tokens(s):
+    """Word tokens of a CT weapon name, dropping the trailing footnote markers
+    (single h/s/m/b/k letters or digits) the table appends as superscripts."""
+    s = re.sub(r'[^a-z0-9]+', ' ', (s or '').lower())
+    return [t for t in s.split()
+            if t not in _CT_FOOTNOTE_TOKENS and not t.isdigit()]
+
+_ct_master_weapons_cache = None
+def _load_ct_master_weapons():
+    """Parse CT00374 → list of (token_set, normal, large). Variant rows (indent
+    > 0) carry their category's tokens too; indented dice spill from the nearest
+    preceding non-indented header. Only rows with two real dice values are kept."""
+    global _ct_master_weapons_cache
+    if _ct_master_weapons_cache is not None:
+        return _ct_master_weapons_cache
+    out = []
+    path = os.path.join(SOURCE_BASE, 'CT', 'CT00374.HTM')
+    if not os.path.exists(path):
+        _ct_master_weapons_cache = out
+        return out
+    soup = BeautifulSoup(open(path, encoding='latin-1').read(), 'html.parser')
+    for table in soup.find_all('table'):
+        category = None
+        for tr in table.find_all('tr'):
+            tds = tr.find_all('td')
+            if not tds:
+                continue
+            raw = tds[0].get_text(' ', strip=False)
+            indent = len(raw) - len(raw.lstrip())
+            name = tds[0].get_text(strip=True)
+            if not name or name == 'Weapon':
+                continue
+            cells = [td.get_text(' ', strip=True) for td in tds]
+            while cells and cells[-1] == '':
+                cells.pop()
+            dice = None
+            if (len(cells) >= 3 and _CT_DICE_RE.match(cells[-3])
+                    and _CT_DICE_RE.match(cells[-2])):
+                dice = (cells[-3], cells[-2])
+            nt = _ct_name_tokens(name)
+            if indent == 0:
+                category = nt
+                if dice:
+                    out.append((set(nt), dice[0], dice[1]))
+            elif dice:
+                base = set(category or []) | set(nt)
+                out.append((base, dice[0], dice[1]))
+    _ct_master_weapons_cache = out
+    return out
+
+def _ct_weapon_dice(name):
+    """Best-effort (normal, large) dice for a PARTS weapon from the CT master
+    table, or (None, None). A CT entry matches when every one of its tokens is
+    covered by a PARTS-name token (exact, or the PARTS token is a ≥4-char prefix
+    — absorbing CT's glued footnotes like 'Billh'); the most specific (largest)
+    matching entry wins."""
+    # Keep the PARTS category token (e.g. 'polearm') — unlike the PHB key, CT
+    # entries are identified by category + variant, so both must be present.
+    clean = re.sub(r'\s*[+-]\d+.*$', '', name or '').replace('volge', 'voulge')
+    P = set(_ct_name_tokens(clean))
+    best, best_n = None, -1
+    for toks, n, l in _load_ct_master_weapons():
+        if all(any(t == p or (len(p) >= 4 and t.startswith(p)) for p in P)
+               for t in toks) and len(toks) > best_n:
+            best, best_n = (n, l), len(toks)
+    return best or (None, None)
+
+
+# ── C&T weapon / armor description glossaries (CT00375 / CT00378) ─────────────
+# These chapters describe each piece of gear as an inline glossary: a bold
+# "Name." header begins an entry, the prose runs until the next bold header, and
+# green (#008000) cross-reference links interrupt the flow (decomposed first).
+# Used as the last-resort description source for weapons/armor the PHB/DMG/AEG
+# don't cover. Copyright-clean: prose read from the user's CT files at runtime.
+_CT_DESC_STOP = {'of', 'the', 'a', 'and', 'vs', 'blending'}
+_CT_DESC_HEAD = re.compile(r"^([A-Z][A-Za-z][\w ,/'\-]{0,40})\.\s*$")
+
+def _ct_desc_words(s):
+    s = re.sub(r'\s*\(.*?\)', '', s or '')        # drop "(AC 3)" parentheticals
+    s = re.sub(r'\s*[+-]\d.*$', '', s)            # drop magic ±N suffix
+    s = re.sub(r'[^a-z0-9]+', ' ', s.lower())
+    return [w for w in s.split() if w not in _CT_DESC_STOP and len(w) > 1]
+
+def _ct_contig(needle, hay):
+    n = len(needle)
+    return bool(n) and n <= len(hay) and \
+        any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
+
+_ct_item_desc_cache = {}
+def _load_ct_item_descriptions(kind):
+    """Parse a CT glossary → list of (word_tuple, html) sorted longest-name-first
+    (so the most specific entry wins). kind: 'weapon'→CT00375, 'armor'→CT00378."""
+    if kind in _ct_item_desc_cache:
+        return _ct_item_desc_cache[kind]
+    fname = 'CT00375.HTM' if kind == 'weapon' else 'CT00378.HTM'
+    path = os.path.join(SOURCE_BASE, 'CT', fname)
+    out = []
+    if os.path.exists(path):
+        soup = BeautifulSoup(open(path, encoding='latin-1').read(), 'html.parser')
+        for f in soup.find_all('font'):
+            if str(f.get('color', '')).lower() == '#008000':
+                f.decompose()
+        body = soup.body or soup
+        heads = [(b, m.group(1).strip())
+                 for b in body.find_all('b')
+                 for m in [_CT_DESC_HEAD.match(b.get_text(' ', strip=True))] if m]
+        for i, (b, name) in enumerate(heads):
+            stop = heads[i + 1][0] if i + 1 < len(heads) else None
+            texts = []
+            for s in b.next_elements:
+                if s is stop:
+                    break
+                if isinstance(s, str):
+                    texts.append(s)
+            desc = ' '.join(' '.join(texts).split()).lstrip('. ').strip()
+            desc = re.sub(r'^' + re.escape(name) + r'\.\s*', '', desc, flags=re.I)
+            if len(desc) >= 25:
+                out.append((tuple(_ct_desc_words(name)), f'<p>{desc}</p>'))
+        out.sort(key=lambda e: -len(e[0]))
+    _ct_item_desc_cache[kind] = out
+    return out
+
+def _ct_item_description(name, kind):
+    """Best contiguous-phrase match of a PARTS weapon/armor name against the CT
+    glossary, or ''. Tries the name as-is, the comma-swapped form ('Axe, battle'
+    → 'battle axe'), and the post-comma variant alone; the longest matching CT
+    name wins (entries are pre-sorted longest-first)."""
+    forms = [_ct_desc_words(name)]
+    if ',' in name:
+        head, tail = name.split(',', 1)
+        forms.append(_ct_desc_words(tail) + _ct_desc_words(head))
+        forms.append(_ct_desc_words(tail))
+    for toks, html in _load_ct_item_descriptions(kind):
+        if any(_ct_contig(list(toks), f) for f in forms):
+            return html
+    return ''
+
+
+# ── DMG potion descriptions + heal actions (the "X-- Potion" glossary) ───────
+# Each potion has its own DMG page titled "<Type>-- Potion" (e.g. "Healing--
+# Potion", "Oil of Elemental Invulnerability-- Potion"). PARTS names them
+# "Potion of <Type>" / "Oil of <Type>" with parenthetical or comma variants, so
+# we match on a token set that drops the wrapper words (potion/oil/elixir/of) and
+# the variant qualifiers. HP-restoring potions also yield a rollable heal formula
+# from "restores NdN[+N] hit points". Copyright-clean: read from the user's DMG.
+_POTION_DROP_WORDS = {'potion', 'oil', 'elixir', 'philter', 'philtre',
+                      'of', 'the', 'a', 'and'}
+_POTION_VARIANT_RE = re.compile(
+    r',\s*(air|water|fire|earth|red|blue|green|gold|silver|copper|brass|bronze'
+    r'|white|black)\b.*$', re.I)
+_POTION_HEAL_RE = re.compile(
+    r'restores?\s+(\d+d\d+(?:\s*[+-]\s*\d+)?)\s+hit\s+points', re.I)
+
+def _potion_tokens(name):
+    s = re.sub(r'\s*\(.*?\)', '', (name or '').lower())   # drop "(Blue)"/"(fish)"
+    s = _POTION_VARIANT_RE.sub('', s)                      # drop ", Air"/", red"
+    s = re.sub(r'[^a-z0-9]+', ' ', s)
+    return frozenset(w for w in s.split()
+                     if w not in _POTION_DROP_WORDS and len(w) > 1)
+
+_dmg_potion_index_cache = None
+def _load_dmg_potion_index():
+    """{token_set: filepath} for every DMG "<Type>-- Potion" page."""
+    global _dmg_potion_index_cache
+    if _dmg_potion_index_cache is not None:
+        return _dmg_potion_index_cache
+    out = {}
+    book_dir = os.path.join(SOURCE_BASE, 'DMG')
+    if os.path.isdir(book_dir):
+        for fn in os.listdir(book_dir):
+            if not (fn.upper().startswith('DMG') and fn.upper().endswith('.HTM')):
+                continue
+            fp = os.path.join(book_dir, fn)
+            try:
+                title = extract_title(fp).strip()
+            except Exception:
+                continue
+            m = re.match(r'(.+?)--\s*Potion\b', title)
+            if m:
+                ts = _potion_tokens(m.group(1))
+                if ts and ts not in out:
+                    out[ts] = fp
+    _dmg_potion_index_cache = out
+    return out
+
+def _potion_description_and_heal(name):
+    """(description_html, heal_formula) for a potion from its DMG page, or
+    ('', ''). The token set matches exactly or by the most specific subset; the
+    heal formula is filled only for HP-restoring potions."""
+    idx = _load_dmg_potion_index()
+    q = _potion_tokens(re.sub(r'^potion of\s+', '', name or '', flags=re.I))
+    fp = idx.get(q)
+    if not fp:
+        best, bn = None, 0
+        for ts, path in idx.items():
+            if ts and ts <= q and len(ts) > bn:
+                best, bn = path, len(ts)
+        fp = best
+    if not fp:
+        return '', ''
+    src = {f.upper(): f for f in os.listdir(os.path.dirname(fp))}
+    try:
+        html = clean_html_file(fp, 'DMG', src)
+    except Exception:
+        return '', ''
+    text = ' '.join(BeautifulSoup(open(fp, encoding='latin-1').read(),
+                                  'html.parser').get_text(' ').split())
+    m = _POTION_HEAL_RE.search(text)
+    return html, (re.sub(r'\s+', '', m.group(1)) if m else '')
+
+
+# ── Mechanics parsed from item/potion description prose → rollable actions ────
+# When the rules text states dice ("restores 2d4+2 hit points", "inflicts 6d6
+# points of damage"), generate the matching heal/damage action so the item is
+# rollable, not just a trigger. Guards against the two ways "N points of damage"
+# misleads: reader-penalty tomes, and ingestion side-effects ("consumption
+# causes …"). Save/duration are left to the description (no negate/half data).
+_MECH_DICE = r'(\d+d\d+(?:\s*[+-]\s*\d+)?)'
+_MECH_HEAL_RE = re.compile(
+    r'(?:restores?|cures?|heals?|regenerates?)\s+(?:up to\s+)?' + _MECH_DICE +
+    r'\s+(?:hit\s+points|points?\s+of\s+(?:damage|wounds))', re.I)
+_MECH_DMG_RE = re.compile(
+    r'(?:inflicts?|deals?|causes?|does|strikes? for)\s+' + _MECH_DICE +
+    r'\s+(?:points?\s+of\s+)?([a-z]+\s+)?damage', re.I)
+_MECH_DMG_EXNAME = re.compile(r'\b(book|tome|manual|libram)\b', re.I)
+_MECH_DMG_INGEST = re.compile(
+    r'consumption|spoonful|if (?:drunk|eaten|swallow)|mistaken for', re.I)
+_MECH_DMG_TYPES = {'fire': 'fire', 'cold': 'cold', 'frost': 'cold', 'acid': 'acid',
+                   'lightning': 'lightning', 'electrical': 'lightning',
+                   'electricity': 'lightning', 'force': 'force', 'poison': 'poison'}
+
+def _item_action_mechanics(description, name):
+    """(heal_formula, damage_formula, damage_type) parsed from an item/potion
+    description, each '' when absent."""
+    text = ' '.join(BeautifulSoup(description or '', 'html.parser')
+                    .get_text(' ').split())
+    heal = ''
+    m = _MECH_HEAL_RE.search(text)
+    if m:
+        heal = re.sub(r'\s+', '', m.group(1))
+    dmg = dtype = ''
+    if not _MECH_DMG_EXNAME.search(name):
+        for m in _MECH_DMG_RE.finditer(text):
+            seg = text[max(0, m.start() - 40):m.start()]
+            if re.search(r'restores?|cures?|heals?|regenerat', seg, re.I):
+                continue
+            if _MECH_DMG_INGEST.search(seg):
+                continue
+            dmg = re.sub(r'\s+', '', m.group(1))
+            dtype = _MECH_DMG_TYPES.get((m.group(2) or '').strip().lower(), '')
+            break
+    return heal, dmg, dtype
+
+_ACTION_DMG_ICON = 'systems/ars/icons/general/DamageColor.png'
+_ACTION_HEAL_ICON = 'icons/svg/heal.svg'
+
+def _mechanic_actions(description, name):
+    """Heal/damage action objects parsed from the description (possibly empty)."""
+    heal, dmg, dtype = _item_action_mechanics(description, name)
+    acts = []
+    if heal:
+        acts.append(_make_action('Heal', type_='heal', targeting='self',
+                                 formula=heal, img=_ACTION_HEAL_ICON))
+    if dmg:
+        acts.append(_make_action('Damage', type_='damage', targeting='single',
+                                 formula=dmg, damage_type=dtype,
+                                 img=_ACTION_DMG_ICON))
+    return acts
+
+
+# ── Ranged-weapon typing (PHB Table 45 — Missile Weapon Ranges, PHB00220) ────
+# Word-boundary keywords for launcher weapons (bows, crossbows, slings, blowgun,
+# arquebus). \b prevents 'bow' matching inside 'elbow'/'rainbow'/'bowl'/'bowyer'.
+# This is a copyright-clean reference (a name pattern, not rules data); the range
+# *values* are read from PHB Table 45 at runtime, never hardcoded.
+_RANGED_WEAPON_RE = re.compile(
+    r'\b(crossbow|longbow|shortbow|bow|sling|blowgun|arquebus)\b', re.I)
+
+# Ammo qualifiers stripped from a Table-45 weapon name to reach its base weapon
+# ("Sling bullet"/"Sling stone" → "sling"; "Comp. long bow, flight arrow" → the
+# composite long bow). Order matters: two-word forms before their single words.
+_MISSILE_AMMO_WORDS = ['flight arrow', 'sheaf arrow', 'arrow',
+                       'quarrel', 'bolt', 'bullet', 'stone', 'needle']
+
+def _missile_name_tokens(s):
+    """Normalize a weapon name to a token set for subset matching. Folds the
+    'Comp.' abbreviation and the one-word 'longbow'/'shortbow' spellings used in
+    Table 45 so they line up with the PARTS.DAT 'Composite long bow' style."""
+    s = s.lower().replace('comp.', 'composite')
+    s = re.sub(r'\blongbow\b', 'long bow', s)
+    s = re.sub(r'\bshortbow\b', 'short bow', s)
+    s = re.sub(r'[^a-z0-9 ]', ' ', s)
+    return set(t for t in s.split() if t)
+
+_phb_missile_ranges_cache = None
+def _load_phb_missile_ranges():
+    """Parse PHB00220 (Table 45, Missile Weapon Ranges) → list of
+    (base_token_set, {short, medium, long}) records. Multi-row spillover (a
+    weapon whose name wraps onto a stat row, e.g. 'Comp. long bow,' + 'flight
+    arrow') is rejoined; the first profile per base weapon wins (flight-arrow
+    ranges precede sheaf-arrow). '--' (no range at that band) becomes ''. All
+    values are sourced from the user's PHB at runtime."""
+    global _phb_missile_ranges_cache
+    if _phb_missile_ranges_cache is not None:
+        return _phb_missile_ranges_cache
+    path = os.path.join(SOURCE_BASE, 'PHB', 'PHB00220.HTM')
+    out = []
+    if not os.path.exists(path):
+        _phb_missile_ranges_cache = out
+        return out
+    soup = BeautifulSoup(open(path, encoding='cp1252').read(), 'html.parser')
+    pending = None
+    seen = set()
+    for tr in soup.find_all('tr'):
+        cells = [td.get_text(strip=True) for td in tr.find_all('td')]
+        if len(cells) < 5:
+            continue
+        name, _rof, s, m, l = cells[0], cells[1], cells[2], cells[3], cells[4]
+        if name in ('', 'Weapon') or s == 'S':       # header rows
+            continue
+        if not (s or m or l):                          # name-only continuation
+            pending = name.rstrip(',').strip()
+            continue
+        full = (pending + ' ' + name).strip() if pending else name
+        pending = None
+        base = full.lower()
+        for ammo in _MISSILE_AMMO_WORDS:
+            base = re.sub(r',?\s*' + re.escape(ammo) + r'\b', '', base)
+        base = base.strip().strip(',').strip()
+        toks = frozenset(_missile_name_tokens(base))
+        if not toks or toks in seen:
+            continue
+        seen.add(toks)
+        rng = {'short':  s if s != '--' else '',
+               'medium': m if m != '--' else '',
+               'long':   l if l != '--' else ''}
+        out.append((toks, rng))
+    _phb_missile_ranges_cache = out
+    return out
+
+def _missile_range_for(name):
+    """Best-effort PHB Table-45 range bands for a weapon name, or None. Matches a
+    table entry whose tokens are a subset of the weapon's tokens and prefers the
+    most specific (largest token set) — so 'Staff sling' picks the staff-sling
+    row over the plain 'sling' row. Returns None when nothing matches; callers
+    leave the range blank rather than fabricate one."""
+    itoks = _missile_name_tokens(name)
+    best, best_n = None, -1
+    for toks, rng in _load_phb_missile_ranges():
+        if toks <= itoks and len(toks) > best_n:
+            best, best_n = rng, len(toks)
+    return best
 
 
 # ── PHB Table 37 — Nonweapon Proficiency Groups (PHB00133.HTM) ───────────────
@@ -10219,14 +10865,22 @@ def migrate_proficiencies():
                                        'Item', sort=300000)
     _WS_ICON = 'icons/weapons/swords/greatsword-crossguard-embossed-gold.webp'
     _WS_BOW_ICON = 'icons/skills/ranged/archery-bow-attack-yellow.webp'
+    # The bow specialist's +2 to-hit applies only at point-blank range. Model it
+    # as an ARS proficiency conditional `{key: "target.distance", value: "LO,HI"}`
+    # (band sourced from PHB00127 above): the engine then gates the item's `hit`
+    # bonus to targets within that range instead of granting it unconditionally.
+    bow_conditionals = []
+    if ws.get('bow_pb'):
+        lo, hi = ws['bow_pb']
+        bow_conditionals = [{'key': 'target.distance', 'value': f'{lo},{hi}'}]
     ws_specs = [
         ('Weapon Specialization (Melee)', _WS_ICON,
-         ws['melee_desc'], ws['melee_atk'], ws['melee_dmg'], ws['melee_cost']),
+         ws['melee_desc'], ws['melee_atk'], ws['melee_dmg'], ws['melee_cost'], []),
         ('Weapon Specialization (Bow)',   _WS_BOW_ICON,
-         ws['bow_desc'],   ws['bow_atk'],   0,              ws['bow_cost']),
+         ws['bow_desc'],   ws['bow_atk'],   0,              ws['bow_cost'], bow_conditionals),
     ]
     ws_items_extra = []
-    for ws_name, ws_icon, ws_desc, ws_hit, ws_dmg, ws_cost in ws_specs:
+    for ws_name, ws_icon, ws_desc, ws_hit, ws_dmg, ws_cost, ws_conds in ws_specs:
         ws_items_extra.append({
             '_id': make_id(), 'name': ws_name, 'type': 'proficiency', 'img': ws_icon,
             'effects': [],
@@ -10237,7 +10891,7 @@ def migrate_proficiencies():
                 'damage': str(ws_dmg) if ws_dmg else '',
                 'speed': 0, 'attacks': '', 'migrate': False,
                 'attributes': {'rarity': '', 'type': '', 'subtype': '', 'magic': False,
-                               'properties': [], 'skillmods': [], 'conditionals': [],
+                               'properties': [], 'skillmods': [], 'conditionals': ws_conds,
                                'identified': True, 'infiniteammo': False,
                                'size': 'medium', 'material': 'leather_book'},
                 'charges':  {'value': 0, 'min': 0, 'max': 0, 'reuse': 'none'},
