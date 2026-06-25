@@ -8446,6 +8446,14 @@ def _class_ability_effect_changes(name, lead_text=''):
                  'value': {'formula': formula, 'properties': props},
                  'priority': 20, 'phase': 'initial', 'last': ''}]
 
+    def _statusimmune(conditions):
+        # ARS reads special.statusimmune as a comma-separated string of condition
+        # names (String(value).split(',')). The precise rules scoping (e.g. the
+        # druid's charm immunity applies only to woodland creatures) stays in the
+        # description for the DM; the effect models the dominant mechanical case.
+        return [{'key': 'special.statusimmune', 'type': 'custom',
+                 'value': conditions, 'priority': 20, 'phase': 'initial', 'last': ''}]
+
     if 'saving throw bonus' in low:
         # Parse the bonus magnitude from the PHB text at runtime; emit nothing
         # if it can't be read rather than fabricate a value.
@@ -8455,6 +8463,16 @@ def _class_ability_effect_changes(name, lead_text=''):
     if 'fire' in low and ('electrical' in low or 'lightning' in low):
         m = re.search(r'\+\s*(\d+)', lead_text)
         return _save(m.group(1), 'fire,lightning') if m else []
+
+    # True immunities only (not "resistance"/"resist", which are save bonuses).
+    if 'charm' in low and 'immun' in low:
+        return _statusimmune('charm')
+
+    if 'poison' in low and 'immun' in low:
+        return _statusimmune('poison')
+
+    if 'disease' in low and 'immun' in low:
+        return _statusimmune('disease')
 
     return []
 
@@ -8495,6 +8513,15 @@ def _class_ability_action_groups(name, text=''):
         # stated limit rather than a hardcoded frequency.
         return [_make_action_group('Shapechange', icon, [
             _make_action('Shapechange', type_='use', targeting='self',
+                         img=icon, charges_per_day=_parse_per_day(text)),
+        ])]
+
+    # Activatable hierophant utility powers — a clickable self "use" card. Any
+    # stated daily limit is read from the text; 0 = at will.
+    if ('alter appearance' in low or 'hibernation' in low
+            or 'elemental plane' in low):
+        return [_make_action_group(name, icon, [
+            _make_action(name, type_='use', targeting='self',
                          img=icon, charges_per_day=_parse_per_day(text)),
         ])]
 
