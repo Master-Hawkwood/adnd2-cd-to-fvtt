@@ -11509,28 +11509,42 @@ _KIT_ABILITY_SECTION_RE = re.compile(
     re.I
 )
 
+# Any known kit field label — used to mark where a benefit/hindrance section ends
+# (the prose continues across several <p> paragraphs until the next label). These
+# are generic English section names, not copyrighted content.
+_KIT_SECTION_LABEL_RE = re.compile(
+    r'^(Description|Role|Secondary Skills?|Weapon Proficien\w*|Nonweapon Proficien\w*|'
+    r'Bonus Proficien\w*|Equipment|Money|Starting|Wealth(?: Options?)?|Special Benefits?|'
+    r'Special Hindrances?|Benefits?(?:/Hindrances?)?|Hindrances?|Races?|Notes?|'
+    r'Recommended|Required|Suggested|Allowed|Barred|Restrictions?)\b', re.I)
+
 
 def _extract_kit_ability_sections(html):
-    """Return [(label, html_block), ...] for benefit/hindrance <p> sections in a
-    kit description HTML. The label is the section heading text (without colon).
-    Works for both HTM-sourced (plain-text labels inside <p>) and DAT-sourced
-    (<strong>-wrapped labels) descriptions."""
+    """Return [(label, html_block), ...] for benefit/hindrance sections in a kit
+    description. The label is the section heading text (without colon); the block
+    is the FULL section — the labelled <p> plus every following <p> up to the next
+    kit field label (benefit/hindrance prose spans several paragraphs). Works for
+    both HTM-sourced (plain-text labels) and DAT-sourced (<strong> labels)."""
     if not html:
         return []
     soup = BeautifulSoup(html, 'html.parser')
+    ps = soup.find_all('p')
     results = []
     seen = set()
-    for p in soup.find_all('p'):
-        p_text = p.get_text(strip=True)
-        m = _KIT_ABILITY_SECTION_RE.match(p_text)
+    for idx, p in enumerate(ps):
+        m = _KIT_ABILITY_SECTION_RE.match(p.get_text(strip=True))
         if not m:
             continue
-        label = m.group(1).strip()
-        key   = label.lower()
+        key = m.group(1).strip().lower()
         if key in seen:
             continue
         seen.add(key)
-        results.append((label, str(p)))
+        block = [str(p)]
+        for q in ps[idx + 1:]:
+            if _KIT_SECTION_LABEL_RE.match(q.get_text(strip=True)):
+                break
+            block.append(str(q))
+        results.append((m.group(1).strip(), ''.join(block)))
     return results
 
 
