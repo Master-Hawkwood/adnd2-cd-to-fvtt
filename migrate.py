@@ -8853,19 +8853,81 @@ def _class_abilities_for(cls, class_descs):
 
 _RANGER_THIEVING_SKILLS = frozenset({'Move Silently', 'Hide in Shadows'})
 
+# Bard and Ranger use their own level-1 base scores for the thief skills they
+# share with the Thief (Tables 33 / 18). Where a class's score differs, a
+# distinct "<Skill> (<Class>)" variant skill item is emitted by migrate_skills
+# and auto-granted instead of the Thief-scored item. The label/subset here are
+# the only hardcoded bits — the scores that decide whether a variant exists are
+# read from the PHB tables at runtime (loaders resolved at call time, since they
+# are defined later in the file).
+def _class_thief_variant_spec(cls_low):
+    """Return (label, base_skill_set, class_scores_dict) for a class that has
+    its own thieving-skill base scores, or None."""
+    if cls_low == 'bard':
+        return 'Bard', _BARD_THIEVING_SKILLS, _load_bard_thief_skill_base_scores()
+    if cls_low == 'ranger':
+        return 'Ranger', _RANGER_THIEVING_SKILLS, _load_ranger_thief_skill_base_scores()
+    return None
+
+
+def _class_thief_skill_variant_name(label, base_name, cls_scores, thief_scores):
+    """Return the granted skill name for a class's thieving skill: the
+    "<base> (<label>)" variant when its base score differs from the Thief's,
+    otherwise the shared base name."""
+    key = base_name.lower()
+    pct = cls_scores.get(key)
+    if pct is not None and pct != thief_scores.get(key):
+        return f"{base_name} ({label})"
+    return base_name
+
 
 def _class_thieving_skills_for(cls_name):
-    """Return the list of thieving skill names to auto-grant for a class.
-    Thief gets all 8; Bard gets the 4 in _BARD_THIEVING_SKILLS; Ranger gets
-    Move Silently and Hide in Shadows (Table 18, PHB)."""
+    """Return the list of thieving skill item names to auto-grant for a class.
+    Thief gets all 8 (shared, Thief-scored); Bard/Ranger get their subset, using
+    the class-specific variant name wherever their base score differs."""
     low = cls_name.lower()
     if low == 'thief':
         return list(_THIEVING_SKILL_NAMES)
-    if low == 'bard':
-        return [s for s in _THIEVING_SKILL_NAMES if s in _BARD_THIEVING_SKILLS]
-    if low == 'ranger':
-        return [s for s in _THIEVING_SKILL_NAMES if s in _RANGER_THIEVING_SKILLS]
-    return []
+    spec = _class_thief_variant_spec(low)
+    if not spec:
+        return []
+    label, base_set, cls_scores = spec
+    thief_scores = _thief_canonical_scores()
+    return [_class_thief_skill_variant_name(label, s, cls_scores, thief_scores)
+            for s in _THIEVING_SKILL_NAMES if s in base_set]
+
+
+# Normalize a S&P thief-skill ability label to the classic skill display name.
+_CP_SKILL_NAME_ALIASES = {'escaping bonds': 'escape bonds'}
+# Only these classes' CP abilities link to rogue skills (the others may list a
+# similarly-named option, e.g. a S&P Fighter's "Move silently", which is out of
+# scope here).
+_CP_ROGUE_SKILL_CLASSES = frozenset({'thief', 'bard', 'ranger'})
+
+
+def _cp_skill_link_name(cls_name, raw_skill_name):
+    """Given a rogue class and a skill name parsed from its S&P CP page, return
+    the *classic* skill item name the CP-purchase ability should link to (auto-
+    grant), or None if the name is not one of the 13 scored thieving skills.
+    Bard/Ranger map to their "(Class)" variant where their base score differs;
+    everything else maps to the shared Thief-scored skill."""
+    key = raw_skill_name.strip().lower()
+    key = _CP_SKILL_NAME_ALIASES.get(key, key)
+    if key not in _thief_canonical_scores():
+        return None     # not a scored rogue skill → no link
+    # The 8 PHB skills may have a Bard/Ranger variant; the 5 S&P expansion skills
+    # (bribe, detect magic, detect illusion, tunneling, escape bonds) do not, so
+    # they link straight to the base skill. The returned name is only ever used
+    # via .lower() for the skill_map lookup, so a lowercase key resolves fine.
+    base_display = next((s for s in _THIEVING_SKILL_NAMES if s.lower() == key), None)
+    if base_display is None:
+        return key
+    spec = _class_thief_variant_spec(cls_name.lower())
+    if not spec or base_display not in spec[1]:
+        return base_display
+    label, _base_set, cls_scores = spec
+    return _class_thief_skill_variant_name(label, base_display, cls_scores,
+                                           _thief_canonical_scores())
 
 
 def migrate_classes():
@@ -9062,11 +9124,13 @@ def migrate_classes():
 
             for label, body_html in _parse_sp_class_abilities_section(sp_rel):
                 # Parse "Name (cost)" format — cost may be N, N/M, N/M/P, or N+
+                # (the trailing '*' the source puts on scored thief skills is
+                # stripped; detection of those is by name, below).
                 m = re.match(r'^(.*?)\s*\(([\d+/]+)\)\s*$',
                              label.strip())
                 if not m:
                     continue
-                raw_name  = m.group(1).strip()
+                raw_name  = m.group(1).strip().rstrip('*').strip()
                 cost_str  = m.group(2)       # e.g. "5", "5/10", "5+"
                 display   = f'{_title_case(raw_name)} ({cost_str} CP)'
                 icon      = _class_ability_icon(raw_name)
@@ -9084,6 +9148,25 @@ def migrate_classes():
                 ab['folder'] = ab_fid
                 ab['flags']  = {'adnd2': {'cpCost': first_cost,
                                           'cpClass': ab_folder_label}}
+                # Link a rogue-class CP purchase to the classic skill it grants,
+                # so buying the ability auto-grants the skill at the correct
+                # Thief/Bard/Ranger base score (no skill duplication).
+                if cls_name.lower() in _CP_ROGUE_SKILL_CLASSES:
+                    link_name = _cp_skill_link_name(cls_name, raw_name)
+                    entry = skill_map.get(link_name.lower()) if link_name else None
+                    if entry:
+                        sid, sname, simg, spack = entry
+                        ab['system']['itemList'] = [{
+                            'id':         sid,
+                            'uuid':       f'Compendium.{MODULE_ID}.adnd2-{spack}.Item.{sid}',
+                            'sourceuuid': f'Compendium.{MODULE_ID}.adnd2-classes.Item.{ab["_id"]}',
+                            'type':       'skill',
+                            'name':       sname,
+                            'img':        simg,
+                            'quantity':   '1',
+                            'level':      '0',
+                        }]
+                        total_skill_links += 1
                 db.put(f'!items!{ab["_id"]}'.encode(),
                        json.dumps(ab).encode())
                 if ef:
@@ -10257,6 +10340,86 @@ def _load_sp_thief_skill_base_scores():
     return out
 
 
+def _thief_canonical_scores():
+    """Thief level-1 thieving-skill base scores keyed lowercase. S&P (SP00073,
+    13 skills) is the reference superset; PHB (8 skills) is identical for the
+    shared ones. Used both to build the rogue skills and to decide whether a
+    class variant (Bard/Ranger) differs from the Thief baseline."""
+    base = dict(_load_phb_thief_skill_base_scores())
+    for k, v in _load_sp_thief_skill_base_scores().items():
+        base.setdefault(k, v)
+    return base
+
+
+def _parse_two_row_header_pct_table(path, data_first_cell=None):
+    """Parse a PHB ability table whose column names span two header rows
+    (e.g. 'Climb'/'Walls', 'Hide in'/'Shadows') and return
+    {reconstructed_column_name_lower: percent_int} for one value row.
+
+    If `data_first_cell` is given (e.g. '1' for the Ranger level-1 row), the
+    value row is the first data row whose first cell equals it, and the two rows
+    above it are the header. Otherwise the value row is the first row whose
+    non-empty cells are all 'N%', with the two rows above as the header.
+    Only columns whose reconstructed name matches a known thieving-skill anchor
+    are kept. All names/numbers are read from the file at runtime."""
+    out = {}
+    if not os.path.exists(path):
+        return out
+    soup = BeautifulSoup(open(path, encoding='cp1252').read(), 'html.parser')
+    rows = []
+    for tr in soup.find_all('tr'):
+        rows.append([td.get_text(strip=True) for td in tr.find_all('td')])
+    val_idx = None
+    if data_first_cell is not None:
+        for i, r in enumerate(rows):
+            if r and r[0] == data_first_cell:
+                val_idx = i; break
+    else:
+        for i, r in enumerate(rows):
+            nz = [c for c in r if c]
+            if nz and all(re.fullmatch(r'\d+%', c) for c in nz):
+                val_idx = i; break
+    if val_idx is None or val_idx < 2:
+        return out
+    h1, h2, vals = rows[val_idx - 2], rows[val_idx - 1], rows[val_idx]
+    anchors = {s.lower() for s in _THIEVING_SKILL_NAMES}
+    for i, v in enumerate(vals):
+        m = re.fullmatch(r'(\d+)%', v or '')
+        if not m:
+            continue
+        name = ' '.join(p for p in [h1[i] if i < len(h1) else '',
+                                    h2[i] if i < len(h2) else ''] if p).strip()
+        if name.lower() in anchors:
+            out[name.lower()] = int(m.group(1))
+    return out
+
+
+# ── PHB Table 33 — Bard thieving-skill base scores (PHB00958.HTM) ────────────
+_bard_thief_base_cache = None
+def _load_bard_thief_skill_base_scores():
+    """Parse PHB00958 (Table 33: Bard Abilities) → {skill_lower: pct}. The bard's
+    level-1 base scores for Climb Walls / Detect Noise / Pick Pockets / Read
+    Languages differ from the Thief's; sourced at runtime."""
+    global _bard_thief_base_cache
+    if _bard_thief_base_cache is None:
+        _bard_thief_base_cache = _parse_two_row_header_pct_table(
+            os.path.join(SOURCE_BASE, 'PHB', 'PHB00958.HTM'))
+    return _bard_thief_base_cache
+
+
+# ── PHB Table 18 — Ranger thieving-skill base scores (PHB00948.HTM) ──────────
+_ranger_thief_base_cache = None
+def _load_ranger_thief_skill_base_scores():
+    """Parse PHB00948 (Table 18: Ranger Abilities) → {skill_lower: pct} for the
+    level-1 row. The ranger's Hide in Shadows / Move Silently base scores differ
+    from the Thief's; sourced at runtime."""
+    global _ranger_thief_base_cache
+    if _ranger_thief_base_cache is None:
+        _ranger_thief_base_cache = _parse_two_row_header_pct_table(
+            os.path.join(SOURCE_BASE, 'PHB', 'PHB00948.HTM'), data_first_cell='1')
+    return _ranger_thief_base_cache
+
+
 # ── SP00068 — Thief class page, contains descriptions of all 13 rogue skills ─
 _sp_thief_skill_desc_cache = None
 def _load_sp_thief_skill_descriptions():
@@ -10982,9 +11145,7 @@ def migrate_skills():
         'escape bonds': 'escaping bonds',
         "thieves' cant": "thieves’ cant",
     }
-    merged_base = dict(rogue_base)   # start from PHB to keep order familiar
-    for k, v in sp_base.items():
-        merged_base.setdefault(k, v)
+    merged_base = _thief_canonical_scores()   # PHB 8 + S&P 5 expansions (13)
     for name_lower, pct in merged_base.items():
         display = _title_skill(name_lower)
         source = 'PHB' if name_lower in rogue_base else 'S&P'
@@ -11008,6 +11169,40 @@ def migrate_skills():
         item['folder'] = rogue_folder['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
         counts['rogue'] += 1
+
+    # ── Class-specific rogue skill variants (Bard / Ranger) ──────────────────
+    # The Bard (Table 33) and Ranger (Table 18) share several thief skills with
+    # the Thief but at different level-1 base scores. Where a class's score
+    # differs, emit a distinct "<Skill> (<Class>)" variant so that class auto-
+    # grants the correctly-scored copy instead of the Thief one. Scores read from
+    # the PHB tables at runtime; description/icon reused from the base skill.
+    counts['rogue_variant'] = 0
+    for cls_low in ('bard', 'ranger'):
+        spec = _class_thief_variant_spec(cls_low)
+        if not spec:
+            continue
+        label, _base_set, cls_scores = spec
+        for name_lower, pct in cls_scores.items():
+            if name_lower not in merged_base or pct == merged_base[name_lower]:
+                continue   # no variant needed when identical to the Thief score
+            base_display = _title_skill(name_lower)
+            display = f"{base_display} ({label})"
+            desc = (rogue_desc.get(name_lower)
+                    or sp_desc.get(name_lower)
+                    or sp_desc.get(desc_aliases.get(name_lower, ''))
+                    or '')
+            icon = _pick_prof_skill_icon(base_display,
+                'icons/skills/social/theft-pickpocket-bribery-brown.webp')
+            item = make_rogue_skill_item(display, pct, desc, icon)
+            item['folder'] = rogue_folder['_id']
+            db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
+            counts['rogue_variant'] += 1
+
+    # NOTE: the Character-Point path does NOT duplicate these skills. Instead,
+    # migrate_classes emits a CP *ability* per scored thief skill (in the class's
+    # CP Abilities folder) whose system.itemList auto-grants the matching classic
+    # skill item above when bought — so the player spends CP in one place and the
+    # correct Thief/Bard/Ranger base score is preserved. See _cp_skill_link_name.
 
     # ── PHB nonweapon proficiencies ──────────────────────────────────────────
     for key, rec in sorted(phb_nwp.items()):
@@ -11064,7 +11259,9 @@ def migrate_skills():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
     total = sum(counts.values())
-    print(f"  → {counts['rogue']} rogue skills, {counts['phb_nwp']} PHB nonweapon profs, "
+    print(f"  → {counts['rogue']} rogue skills "
+          f"(+{counts.get('rogue_variant', 0)} Bard/Ranger variants), "
+          f"{counts['phb_nwp']} PHB nonweapon profs, "
           f"{counts['sp_nwp']} S&P nonweapon profs ({total} skill items total)")
     return total
 
