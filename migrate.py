@@ -4789,6 +4789,10 @@ def _build_class_ranks(cls):
         return partial_cl.get(level, partial_cl_max)
     skill_pts_start = cls.get('skill_pts_start', 0) or 0
     skill_pts_level = cls.get('skill_pts_level', 0) or 0
+    # Per-level advancement titles. Only the druid has special titles in the 2e
+    # PHB (Initiate/Druid/Archdruid/Great Druid/Grand Druid/Hierophant); other
+    # classes carry no level titles. Sourced from PHB prose at runtime.
+    title_map = _druid_titles() if cls.get('name', '').lower() == 'druid' else {}
     hit_die       = cls.get('hit_die')
     hit_dice_cap  = cls.get('hit_dice_cap')  or 0
     hp_after_cap  = cls.get('hp_after_cap')  or 0
@@ -4881,7 +4885,7 @@ def _build_class_ranks(cls):
             "baseMove":      None,
             "baseAC":        None,
             "classpoints":   (skill_pts_start if level == 1 else skill_pts_level) if (skill_pts_start or skill_pts_level) else None,
-            "title":         "",
+            "title":         title_map.get(level, ""),
             "paralyzation": par, "poison": par, "death": par,
             "rod": rod, "staff": rod, "wand": rod,
             "petrification": pet, "polymorph": pet,
@@ -8291,6 +8295,15 @@ def _class_ability_icon(name):
     All paths validated against FVTT/public/icons/. No SVG fallback — use a
     recognisable webp for every case."""
     low = name.lower()
+    # ── Hierophant druid powers (elemental planes + high-level boons) ───────────
+    if 'elemental plane of earth' in low: return 'icons/magic/earth/projectile-stone-ball-brown.webp'
+    if 'elemental plane of fire'  in low: return 'icons/magic/fire/flame-burning-campfire-orange.webp'
+    if 'elemental plane of water' in low: return 'icons/magic/water/wave-water-blue.webp'
+    if 'elemental plane of air'   in low: return 'icons/magic/air/wind-vortex-swirl-blue.webp'
+    if 'hibernation'      in low: return 'icons/magic/control/sleep-bubble-purple.webp'
+    if 'alter appearance' in low: return 'icons/magic/control/mouth-smile-deception-purple.webp'
+    if 'ageless'          in low or 'vigor' in low: return 'icons/magic/time/hourglass-tilted-glowing-gold.webp'
+    if 'natural poison'   in low: return 'icons/magic/defensive/shield-barrier-glowing-triangle-green.webp'
     # ── Holy / Divine ──────────────────────────────────────────────────────────
     if 'detect evil'      in low: return 'icons/magic/perception/eye-ringed-green.webp'
     if 'lay on hands'     in low: return 'icons/magic/life/heart-glowing-red.webp'
@@ -8595,6 +8608,91 @@ def _druid_granted_abilities():
     return results
 
 
+# ── Hierophant druid powers (16th-20th level) — PHB00092 ─────────────────────
+# Names are descriptive labels/parse anchors; the level comes from the source's
+# "Nth level:" markers and the description from the matching sentences at runtime.
+_DRUID_HIEROPHANT_ANCHORS = [
+    (re.compile(r'immun\w*\s+to\s+all\s+natural\s+poison', re.I),
+     'Immunity to Natural Poisons'),
+    (re.compile(r'no longer subject to the ability score adjustments for aging', re.I),
+     'Ageless Vigor'),
+    (re.compile(r'alter his appearance', re.I), 'Alter Appearance'),
+    (re.compile(r'hibernat', re.I), 'Hibernation'),
+    (re.compile(r'elemental plane of earth', re.I), 'Enter the Elemental Plane of Earth'),
+    (re.compile(r'elemental plane of fire', re.I), 'Enter the Elemental Plane of Fire'),
+    (re.compile(r'elemental plane of water', re.I), 'Enter the Elemental Plane of Water'),
+    (re.compile(r'elemental plane of air', re.I), 'Enter the Elemental Plane of Air'),
+]
+
+
+def _druid_hierophant_abilities():
+    """Parse PHB00092 → [(name, html_desc, level)] for the high-level (16th-20th)
+    hierophant druid powers. Levels come from the 'Nth level:' markers; each
+    ability's description is the matching sentence(s) read from the file."""
+    path = os.path.join(SOURCE_BASE, 'PHB', 'PHB00092.HTM')
+    if not os.path.exists(path):
+        return []
+    txt = re.sub(r'\s+', ' ',
+                 BeautifulSoup(open(path, encoding='cp1252').read(),
+                               'html.parser').get_text(' ')).strip()
+    marks = list(re.finditer(r'(\d+)(?:st|nd|rd|th)\s+[Ll]evel:', txt))
+    out, seen = [], set()
+    for i, mk in enumerate(marks):
+        lvl = int(mk.group(1))
+        seg = txt[mk.end(): marks[i + 1].start() if i + 1 < len(marks) else len(txt)]
+        sentences = re.split(r'(?<=[.])\s+', seg)
+        for pat, name in _DRUID_HIEROPHANT_ANCHORS:
+            if name in seen:
+                continue
+            matched = [s.strip() for s in sentences if pat.search(s)]
+            if matched:
+                seen.add(name)
+                out.append((name, '<p>' + ' '.join(matched) + '</p>', lvl))
+    return out
+
+
+def _druid_titles():
+    """Parse PHB00091/PHB00092 → {level: title} for the druid's special advancement
+    titles (Initiate below 12th, Druid 12th, Archdruid 13th, Great Druid 14th,
+    Grand Druid 15th, Hierophant 16th-20th). All title strings are read from the
+    files at runtime; only the parse anchors are hardcoded."""
+    titles = {}
+    parts = []
+    for fn in ('PHB00091.HTM', 'PHB00092.HTM'):
+        path = os.path.join(SOURCE_BASE, 'PHB', fn)
+        if os.path.exists(path):
+            parts.append(re.sub(r'\s+', ' ',
+                BeautifulSoup(open(path, encoding='cp1252').read(),
+                              'html.parser').get_text(' ')))
+    if not parts:
+        return titles
+    txt = ' '.join(parts)
+    # "<Title> (Nth level)" — covers Great Druid (14th), Grand Druid (15th)
+    for m in re.finditer(r'((?:[A-Z][a-z]+\s+)*[A-Z][a-z]+)\s*'
+                         r'\((\d+)(?:st|nd|rd|th)\s+level\)', txt):
+        titles[int(m.group(2))] = re.sub(r'^The\s+', '', m.group(1)).strip()
+    # Archdruid (13th) — lowercase/plural in prose
+    m = re.search(r'(\w*druids?)\s*\(13th\s+level\)', txt, re.I)
+    if m:
+        titles[13] = m.group(1).rstrip('s').capitalize()
+    # 12th: "title of 'druid'"
+    m = re.search(r'12th\s+level.{0,80}?title\s+of\s+["“]?(\w+)', txt, re.I)
+    if m:
+        titles[12] = m.group(1).capitalize()
+    # below 12th: "officially known as 'initiates'"
+    m = re.search(r'officially known as\s+["“]?(\w+)', txt, re.I)
+    if m:
+        initiate = m.group(1).rstrip('s').capitalize()
+        for lvl in range(1, 12):
+            titles.setdefault(lvl, initiate)
+    # 16th-20th: hierophant
+    m = re.search(r'(hierophant)', txt, re.I)
+    if m:
+        for lvl in range(16, 21):
+            titles[lvl] = m.group(1).capitalize()
+    return titles
+
+
 def _cleric_turn_undead_block(html):
     """Extract the paragraph containing Turn Undead from the Cleric description."""
     if not html:
@@ -8759,17 +8857,64 @@ def _load_weapon_specialization_data():
     }
 
 
+# ── Acquisition level — the class level at which an ability/skill is gained ───
+# Parsed from PHB prose ("at 3rd level", "when he reaches 9th level"). The first
+# convertible level is the acquisition level; later mentions are scaling. The
+# regex/word-map are parse anchors only — the actual level comes from the file.
+_ORDINAL_WORDS = {
+    'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5, 'sixth': 6,
+    'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10, 'eleventh': 11,
+    'twelfth': 12, 'thirteenth': 13, 'fourteenth': 14, 'fifteenth': 15,
+    'sixteenth': 16, 'seventeenth': 17, 'eighteenth': 18, 'nineteenth': 19,
+    'twentieth': 20,
+}
+_ABILITY_LEVEL_RE = re.compile(
+    r'(?:at|upon reaching|upon attaining|when (?:he|she|they) reach(?:es)?|'
+    r'beginning at|reaches?|attains?)\s+(?:the\s+)?'
+    r'(\d+(?:st|nd|rd|th)|' + '|'.join(_ORDINAL_WORDS) + r')\s+level',
+    re.I)
+
+
+def _ability_acquisition_level(*texts):
+    """Return the class level at which an ability/skill becomes available, parsed
+    from its PHB description prose. Defaults to 1 (available from the start) when
+    no acquisition cue is present."""
+    blob = re.sub(r'<[^>]+>', ' ', ' '.join(t for t in texts if t))
+    for m in _ABILITY_LEVEL_RE.finditer(blob):
+        tok = m.group(1).lower()
+        md = re.match(r'(\d+)', tok)
+        lvl = int(md.group(1)) if md else _ORDINAL_WORDS.get(tok)
+        if lvl:
+            return lvl
+    return 1
+
+
+def _class_first_spell_level(cls):
+    """Return the character level at which a class first gains spell slots, read
+    from CLASS.DAT's per-level spell-slot table (row i = char level i+1, first
+    non-zero row). DAT-first source for the spellcasting acquisition level
+    (Paladin 9, Ranger 8, Bard 2, full casters 1). None for non-casters."""
+    table = cls.get('spell_table')
+    if not table:
+        return None
+    for i, row in enumerate(table):
+        if any(v > 0 for v in row):
+            return i + 1
+    return None
+
+
 def _class_abilities_for(cls, class_descs):
     """Return a list of ability spec dicts for a CLASS.DAT class record.
     Each spec has: name, description (HTML), effect_changes, action_groups,
-    icon, and optionally skill_link=True (for thieving-skill itemList entries)."""
+    icon, level (acquisition level), and optionally skill_link=True."""
     group = cls.get('group', '')
     name  = cls.get('name', '')
     desc_html = _get_class_desc(name, group, class_descs)
+    dat_spell_level = _class_first_spell_level(cls)   # DAT-first for spellcasting
     specs = []
     seen_names = set()
 
-    def _push(spec_name, desc='', chg=None, acts=None, lead=''):
+    def _push(spec_name, desc='', chg=None, acts=None, lead='', level=None):
         if not spec_name or spec_name in seen_names:
             return
         seen_names.add(spec_name)
@@ -8778,12 +8923,22 @@ def _class_abilities_for(cls, class_descs):
             chg = _class_ability_effect_changes(spec_name, lead)
         if not acts:
             acts = _class_ability_action_groups(spec_name, f'{desc} {lead}')
+        # Acquisition level: an explicit level wins (e.g. hierophant powers whose
+        # level is parsed from the source); otherwise spellcasting grants come
+        # from CLASS.DAT (DAT-first) and every other ability from the PHB prose.
+        low = spec_name.lower()
+        if level is None:
+            if dat_spell_level and ('priest spells' in low or 'wizard spell' in low):
+                level = dat_spell_level
+            else:
+                level = _ability_acquisition_level(desc, lead)
         specs.append({
             'name':           spec_name,
             'description':    desc,
             'effect_changes': chg or None,
             'action_groups':  acts or None,
             'icon':           icon,
+            'level':          level,
         })
 
     # ── Fighter: Weapon Specialization (PHB00125–127) + Followers (9th, "Lord") ─
@@ -8842,11 +8997,14 @@ def _class_abilities_for(cls, class_descs):
         _push('Followers', _class_followers_block(desc_html) or '')
         _push('Priest Spells')
 
-    # ── Druid: granted powers from PHB00088 ───────────────────────────────────
+    # ── Druid: granted powers (3rd/7th, PHB00088) + hierophant powers
+    #    (16th-20th, PHB00092) with their parsed acquisition levels ────────────
     elif name.lower() == 'druid':
         for ab_name, para_html, para_text in _druid_granted_abilities():
             chg = _class_ability_effect_changes(ab_name, para_text)
             _push(ab_name, para_html, chg=chg)
+        for ab_name, para_html, lvl in _druid_hierophant_abilities():
+            _push(ab_name, para_html, level=lvl)
 
     return specs
 
@@ -9020,10 +9178,11 @@ def migrate_classes():
                 'type':     'ability',
                 'name':     spec['name'],
                 'img':      spec['icon'],
-                'level':    '0',
+                'level':    str(spec.get('level', 1)),
             })
 
-        # ── Add thieving skill cross-pack links (Thief and Bard) ─────────────
+        # ── Add thieving skill cross-pack links (Thief, Bard, Ranger) ────────
+        # All thieving skills are available from level 1.
         for skill_name in _class_thieving_skills_for(cls['name']):
             entry = skill_map.get(skill_name.lower())
             if not entry:
@@ -9036,7 +9195,7 @@ def migrate_classes():
                 'type':     'skill',
                 'name':     sname,
                 'img':      simg,
-                'level':    '0',
+                'level':    '1',
             })
             total_skill_links += 1
 
