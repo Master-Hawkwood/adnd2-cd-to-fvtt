@@ -75,6 +75,13 @@ _PACK_SRC_BASE = "adnd2-compendium-src"
 
 # Phase 2 — HTML rulebooks
 SOURCE_BASE  = "cd-rom/MACBOOKS/HTML"
+# Optional errata override tree. The AD&D Core Rules 2.0 CD-ROM ships the 1995
+# reprint text, which predates TSR's official errata. If the user drops corrected
+# rulebook pages here (same HTML format as the CD; e.g. the WebHelp pages from the
+# official errata distribution), the script substitutes them at import time by
+# matching the page <TITLE>. Nothing errata-related is bundled with the script —
+# this directory is the user's own local copy, read at runtime like the CD-ROM.
+ERRATA_BASE  = "cd-rom/ERRATA"
 OUTPUT_DB    = "adnd2-compendium/packs/adnd2-journals"
 OUTPUT_IMG   = "adnd2-compendium/images"
 MODULE_ID    = "adnd2-compendium"
@@ -523,10 +530,118 @@ def _clean_html_body(body, soup, book_key, src_dir_files):
     return inner
 
 
-def clean_html_file(filepath, book_key, src_dir_files):
-    """Parse one HTML file and return clean semantic HTML."""
+_ERRATA_INDEX = None   # {normalized <TITLE>: errata filepath} or {} if no errata tree
+_ERRATA_FETCH_DONE = False
+
+_ERRATA_TITLE_RE = re.compile(r'<title>(.*?)</title>', re.IGNORECASE | re.DOTALL)
+
+# Source of the corrected rulebook pages: the community-compiled distribution of
+# TSR's official AD&D Core Rules 2.0 errata. We hardcode only the URLs (references,
+# like a file path — never the copyrighted text); the pages are fetched to the
+# user's own machine at runtime and are never bundled with this script. The CD-ROM
+# ships the 1995 reprint text, which predates this errata.
+_ERRATA_REMOTE_BASE = ('https://raw.githubusercontent.com/'
+                       'Alby1987/AD-DCoreRule2.0Errata/main/patch/WebHelp')
+_ERRATA_REMOTE_FILES = [
+    'PHB/DD01857.htm', 'PHB/DD02184.htm', 'PHB/DD02316.htm', 'PHB/DD02355.htm',
+    'DMG/DD00331.htm', 'DMG/DD00823.htm',
+]
+
+
+def _ensure_errata_downloaded():
+    """Best-effort, once-per-run fetch of the errata pages into ERRATA_BASE.
+
+    Skips entirely if ERRATA_BASE already holds errata pages (offline-friendly:
+    download only happens the first time, and re-running works with no network).
+    Any failure — no network, a moved/removed URL, an HTTP error — is swallowed
+    with a warning so the migration always proceeds; errata is simply not applied.
+    Nothing copyrighted is stored in this script: only the URLs are referenced and
+    the fetched pages land in the user's local CD-ROM tree."""
+    global _ERRATA_FETCH_DONE
+    if _ERRATA_FETCH_DONE:
+        return
+    _ERRATA_FETCH_DONE = True
+    # Already have a local copy? Don't re-download.
+    if os.path.isdir(ERRATA_BASE):
+        for _r, _d, files in os.walk(ERRATA_BASE):
+            if any(f.lower().endswith(('.htm', '.html')) for f in files):
+                return
+    import urllib.request
+    import urllib.error
+    got = 0
+    for rel in _ERRATA_REMOTE_FILES:
+        url = f'{_ERRATA_REMOTE_BASE}/{rel}'
+        dest = os.path.join(ERRATA_BASE, rel.replace('/', os.sep))
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = resp.read()
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, 'wb') as f:
+                f.write(data)
+            got += 1
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"  errata: could not fetch {rel} ({exc}); skipping")
+    if got:
+        print(f"  errata: downloaded {got} corrected page(s) to {ERRATA_BASE}")
+
+
+def _errata_title(raw):
+    """Return the normalized <TITLE> text of a CD-ROM/errata HTML string, or None."""
+    m = _ERRATA_TITLE_RE.search(raw)
+    if not m:
+        return None
+    return ' '.join(m.group(1).split()).strip().lower()
+
+
+def _errata_index():
+    """Lazily index the optional ERRATA_BASE override tree by page <TITLE>.
+
+    Returns {normalized_title: filepath}. Empty if the directory is absent — the
+    errata feature is opt-in and the script runs identically without it. The map
+    is keyed by <TITLE> (not filename) because the errata distribution uses a
+    different file-numbering layout than our CD-ROM, but page titles are stable."""
+    global _ERRATA_INDEX
+    if _ERRATA_INDEX is not None:
+        return _ERRATA_INDEX
+    _ensure_errata_downloaded()
+    index = {}
+    if os.path.isdir(ERRATA_BASE):
+        for root, _dirs, files in os.walk(ERRATA_BASE):
+            for fn in files:
+                if not fn.lower().endswith(('.htm', '.html')):
+                    continue
+                fp = os.path.join(root, fn)
+                try:
+                    with open(fp, 'r', encoding='cp1252') as f:
+                        title = _errata_title(f.read())
+                except OSError:
+                    continue
+                if title:
+                    index[title] = fp
+        if index:
+            print(f"  errata: {len(index)} corrected page(s) loaded from {ERRATA_BASE}")
+    _ERRATA_INDEX = index
+    return _ERRATA_INDEX
+
+
+def _read_html_with_errata(filepath):
+    """Read a CD-ROM HTML file, transparently substituting an errata override when
+    one exists for the same page <TITLE>. Returns the raw HTML string."""
     with open(filepath, 'r', encoding='cp1252') as f:
         raw = f.read()
+    index = _errata_index()
+    if index:
+        title = _errata_title(raw)
+        errata_fp = index.get(title) if title else None
+        if errata_fp and os.path.abspath(errata_fp) != os.path.abspath(filepath):
+            with open(errata_fp, 'r', encoding='cp1252') as f:
+                return f.read()
+    return raw
+
+
+def clean_html_file(filepath, book_key, src_dir_files):
+    """Parse one HTML file and return clean semantic HTML."""
+    raw = _read_html_with_errata(filepath)
     soup = BeautifulSoup(raw, 'html.parser')
     body = soup.find('body') or soup
     return _clean_html_body(body, soup, book_key, src_dir_files)

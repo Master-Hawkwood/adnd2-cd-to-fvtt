@@ -105,6 +105,24 @@ The script is **idempotent** — re-running it deletes and fully regenerates the
 
 ---
 
+## Errata
+
+The CD-ROM ships the 1995 reprint text, which predates TSR's official errata for the
+Player's Handbook and Dungeon Master's Guide. On the first run the script automatically
+downloads the community-compiled set of corrected rulebook pages (from the
+[AD-DCoreRule2.0Errata](https://github.com/Alby1987/AD-DCoreRule2.0Errata) distribution)
+into `cd-rom/ERRATA/` and substitutes them by page title while building the journals — so
+corrections like the *Item Saving Throws* table and several spell stat blocks appear in the
+output. This is best-effort: if you are offline or the source has moved, the script prints a
+warning and continues without errata. Delete `cd-rom/ERRATA/` to force a fresh download.
+
+No errata content is bundled with the script — only the source URLs are referenced; the
+corrected pages are fetched to your own machine at runtime, exactly like the CD-ROM content.
+Only PHB/DMG corrections are available as drop-in pages; the Player's Option errata exists
+only as prose correction sheets and is not applied.
+
+---
+
 ## Installing in Foundry VTT
 
 Copy the generated `adnd2-compendium/` folder into your Foundry `Data/modules/` directory:
