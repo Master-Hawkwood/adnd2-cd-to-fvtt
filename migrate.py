@@ -8295,6 +8295,16 @@ def _class_ability_icon(name):
     All paths validated against FVTT/public/icons/. No SVG fallback — use a
     recognisable webp for every case."""
     low = name.lower()
+    # ── HLC high-level (21st+) class powers ─────────────────────────────────────
+    if 'intimidation' in low:        return 'icons/skills/social/intimidation-impressing.webp'
+    if 'scrying' in low:             return 'icons/magic/perception/orb-crystal-ball-scrying-blue.webp'
+    if 'scroll' in low:              return 'icons/tools/scribal/ink-quill-pink.webp'
+    if 'sage ability' in low:        return 'icons/skills/trades/academics-study-reading-book.webp'
+    if 'item identification' in low: return 'icons/tools/scribal/magnifying-glass.webp'
+    if 'undead turning' in low:      return 'icons/magic/holy/prayer-hands-glowing-yellow.webp'
+    if 'holy army' in low:           return 'icons/magic/holy/angel-winged-humanoid-blue.webp'
+    if 'extra thieving' in low:      return 'icons/skills/social/theft-pickpocket-bribery-brown.webp'
+    if 'extra followers' in low:     return 'icons/skills/social/diplomacy-handshake.webp'
     # ── Hierophant druid powers (elemental planes + high-level boons) ───────────
     if 'elemental plane of earth' in low: return 'icons/magic/earth/projectile-stone-ball-brown.webp'
     if 'elemental plane of fire'  in low: return 'icons/magic/fire/flame-burning-campfire-orange.webp'
@@ -8720,6 +8730,44 @@ def _druid_titles():
     return titles
 
 
+# ── High-level (21st+) class powers — HLC "<Class> Beyond 20th Level" pages ───
+# Each page lists its powers as red bold "<Name>:" sub-headers (→ <strong> after
+# cleaning), so _parse_strong_ability_blocks reads them like the PHB paladin/
+# ranger bullets. The acquisition level comes from the prose ("at 21st level",
+# "at 24th level"); abilities whose prose states no threshold default to 21 (the
+# chapter baseline). Only the page references are hardcoded; names/levels/text
+# are read from the user's HLC files at runtime. The wizard page maps to Mage and
+# the priest page to Cleric (its powers — improved turning, holy army — are
+# cleric-flavoured; the druid has its own hierophant powers instead).
+_HLC_CLASS_PAGES = {
+    'Fighter': 'HLC00216', 'Ranger':  'HLC00217', 'Paladin': 'HLC00218',
+    'Mage':    'HLC00222', 'Cleric':  'HLC00227', 'Thief':   'HLC00235',
+    'Bard':    'HLC00237',
+}
+
+
+def _hlc_class_abilities(cls_name):
+    """Parse the HLC 'Beyond 20th Level' page for a class → [(name, html, level)]
+    for its high-level (21st+) special powers, or [] if the class has none."""
+    fn = _HLC_CLASS_PAGES.get(cls_name)
+    if not fn:
+        return []
+    book_dir = os.path.join(SOURCE_BASE, 'HLC')
+    path = os.path.join(book_dir, fn + '.HTM')
+    if not os.path.exists(path):
+        return []
+    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    html = clean_html_file(path, 'HLC', src_files)
+    out = []
+    for lead, block_html in _parse_strong_ability_blocks(html):
+        name = lead.rstrip(':').strip()
+        if not name:
+            continue
+        level = max(21, _ability_acquisition_level(block_html))
+        out.append((name, block_html, level))
+    return out
+
+
 def _cleric_turn_undead_block(html):
     """Extract the paragraph containing Turn Undead from the Cleric description."""
     if not html:
@@ -9032,6 +9080,12 @@ def _class_abilities_for(cls, class_descs):
             _push(ab_name, para_html, chg=chg)
         for ab_name, para_html, lvl in _druid_hierophant_abilities():
             _push(ab_name, para_html, level=lvl)
+
+    # ── High-level (21st+) powers from the HLC book, for every class that has a
+    #    "Beyond 20th Level" page. _push de-dupes against the PHB abilities above
+    #    and auto-attaches an effect where modelable (e.g. Disease Immunity). ───
+    for ab_name, para_html, lvl in _hlc_class_abilities(name):
+        _push(ab_name, para_html, level=lvl)
 
     return specs
 
