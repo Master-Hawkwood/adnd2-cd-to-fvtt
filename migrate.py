@@ -6884,27 +6884,68 @@ def _size_token_to_slug(text):
     return None
 
 
-def _parse_mm_statblock(biography_html):
+def _mm_statblock_column(variant_key, col_names):
+    """Pick the value-column index in a multi-column MM stat block that matches
+    this variant record, or 0 (first column) when there's no confident match.
+    `variant_key` is the monster name minus its genus (e.g. 'Huge', 'Orog',
+    'Great, Leopard'); `col_names` are the comparison-table headers ('Large',
+    'Huge', 'Giant'). Match is exact first, then either-way containment on a
+    trimmed header token, so 'Great, Leopard' resolves to the 'Leopard' column
+    and 'Azmyth' to 'Night Azmyth'. Pure name-vs-header string logic — no game
+    data is embedded, only the caller's own record names and the MM headers."""
+    vk = (variant_key or '').strip().lower()
+    if not vk or not col_names:
+        return 0
+    for i, c in enumerate(col_names):
+        if c.strip().lower() == vk:
+            return i
+    for i, c in enumerate(col_names):
+        cl = c.strip().lower().rstrip('-/ ').strip()
+        if cl and (cl in vk or vk in cl):
+            return i
+    return 0
+
+
+def _parse_mm_statblock(biography_html, variant_key=None):
     """Parse the MM stat-block table from the (already-built) biography HTML
-    into {NORMALIZED_LABEL: first_value_column}. Labels are uppercased with the
-    trailing colon stripped (e.g. "NO. OF ATTACKS"). The first value column is
-    taken (multi-form blocks like Orc/Orog list several). Returns {} if absent.
-    This replaces the fragile tail-strings heuristic for #attacks / morale /
-    special attacks & defenses / damage etc. — all read straight from the MM."""
+    into {NORMALIZED_LABEL: value}. Labels are uppercased with the trailing colon
+    stripped (e.g. "NO. OF ATTACKS"). Multi-form comparison blocks (Giant Scorpion
+    Large/Huge/Giant, Bear Black/Brown/Cave/Polar, Orc/Orog, …) open with a header
+    row of variant names followed by one value column each; the column matching
+    `variant_key` is selected — previously the first column was applied to every
+    variant, so Huge/Giant scorpions inherited the Large damage/morale/etc.
+    (issue #16). Single-form blocks have no header row and yield their sole value
+    column (variant_key ignored). Returns {} if absent. This replaces the fragile
+    tail-strings heuristic for #attacks / morale / special attacks & defenses /
+    damage etc. — all read straight from the MM."""
     out = {}
     if not biography_html or '<table' not in biography_html.lower():
         return out
     tbl = BeautifulSoup(biography_html, 'html.parser').find('table')
     if not tbl:
         return out
-    for tr in tbl.find_all('tr'):
+    rows = tbl.find_all('tr')
+    # A multi-column comparison block opens with a header row: a blank first cell
+    # (the label column) followed by >=2 non-empty variant names. Single-form
+    # blocks start straight into a labeled stat row (one value cell), so this is
+    # never triggered for them.
+    col_names = []
+    body_rows = rows
+    if rows:
+        head = [c.get_text(' ', strip=True) for c in rows[0].find_all('td')]
+        if head and not head[0].strip() and sum(1 for c in head[1:] if c.strip()) >= 2:
+            col_names = [c.strip() for c in head[1:]]
+            body_rows = rows[1:]
+    col_idx = _mm_statblock_column(variant_key, col_names)
+    for tr in body_rows:
         cells = tr.find_all('td')
         if len(cells) < 2:
             continue
         label = cells[0].get_text(' ', strip=True).upper().rstrip(':').strip()
-        value = cells[1].get_text(' ', strip=True)
-        if label and label not in out:
-            out[label] = value
+        if not label or label in out:
+            continue
+        vals = [c.get_text(' ', strip=True) for c in cells[1:]]
+        out[label] = vals[col_idx] if col_idx < len(vals) else vals[0]
     return out
 
 
@@ -7044,6 +7085,10 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     # Remove HD suffix like ", 3 Hit Dice" or ", 8HD"
     base = re.sub(r',\s*\d+\s*(?:Hit\s*Dice|HD).*$', '', name).strip()
     candidates.append(base)
+    # Variant qualifier = the record name past its genus ('Scorpion, Huge' →
+    # 'Huge', 'Cat, Great, Leopard' → 'Great, Leopard'). Used to pick this
+    # variant's column out of a multi-form MM comparison stat block (issue #16).
+    variant_key = base.split(',', 1)[1].strip() if ',' in base else ''
     # Try progressively shorter prefixes
     parts = [p.strip() for p in base.split(',')]
     while len(parts) > 1:
@@ -7058,7 +7103,7 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
     # Parse the MM stat-block table once. It's the authoritative, structured
     # source for the 2e monster-block fields (#attacks, morale, damage, special
     # attacks/defenses, …) — far cleaner than the DAT "tail strings" heuristic.
-    sb = _parse_mm_statblock(biography)
+    sb = _parse_mm_statblock(biography, variant_key)
     # Resolve biography display value: prefer an @embed reference to the MM
     # journal page (already migrated in Phase 2) so the NPC sheet shows the
     # formatted rulebook page. Fall back to the raw HTML when no matching page
