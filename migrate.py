@@ -161,9 +161,21 @@ SYSTEM_VERSION = "2026.05.31"
 
 # ─── ID generation ────────────────────────────────────────────────────────────
 
+_ID_ALPHABET = string.ascii_letters + string.digits
+_GENERATED_IDS = set()   # every id handed out — remapped by _stabilize_ids()
+# Fixed seed: provisional ids (and so every "first match by file name" choice
+# made before _stabilize_ids) come out the same on every run and platform.
+_ID_RNG = random.Random(0x2E2E)
+
 def make_id(length=16):
-    """Random alphanumeric Foundry document `_id` (16 chars is Foundry's width)."""
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    """Provisional alphanumeric Foundry `_id` (16 chars is Foundry's width).
+    Provisional: _stabilize_ids() replaces every id issued here with one derived
+    from the document's content before packing, so a rebuild keeps the same ids."""
+    while True:
+        new = ''.join(_ID_RNG.choices(_ID_ALPHABET, k=length))
+        if new not in _GENERATED_IDS:
+            _GENERATED_IDS.add(new)
+            return new
 
 # ─── Image copy with transparency removal ─────────────────────────────────────
 
@@ -5550,7 +5562,11 @@ def make_part_item(part, img_path=None, base_weapons=None):
         # (dagger, spear, …) stay "melee" — we model a single item, not a
         # separate thrown profile. Range bands come from PHB Table 45 at runtime.
         is_ranged = bool(_RANGED_WEAPON_RE.search(part['name']))
-        attack_range = (_missile_range_for(part['name']) if is_ranged else None) \
+        # Thrown melee weapons (dagger, hand axe, spear, javelin, dart, …): a
+        # PHB Table 45 row whose words include the weapon's category word, so
+        # "Polearm, lucern hammer" never inherits the plain "hammer" row.
+        thrown_range = None if is_ranged else _thrown_range_for(part['name'])
+        attack_range = (_missile_range_for(part['name']) if is_ranged else thrown_range) \
             or {"short": "", "medium": "", "long": ""}
         system["attack"] = {
             "speed": part.get('speed', 0),
@@ -5559,6 +5575,9 @@ def make_part_item(part, img_path=None, base_weapons=None):
             "modifier": 0, "magicBonus": magic_bonus, "magicPotency": 0,
             "range": attack_range,
             "primary": False, "speedmod": "",
+            # ARS 2026.11.02 attack modes. Blank overrides = use the core values.
+            "modes": _weapon_attack_modes(
+                melee=not is_ranged, thrown=bool(thrown_range), ranged=is_ranged),
         }
         dmg_code = part.get('damage_type', '')
         dmg_types = _weapon_damage_type_list(dmg_code)
@@ -7427,6 +7446,109 @@ def _open_pack(path):
     return _JsonPack(pack_name, src_dir)
 
 
+def _stable_id(seed):
+    """16-char base-62 id derived from `seed` (sha1) — same seed, same id."""
+    import hashlib
+    n = int.from_bytes(hashlib.sha1(seed.encode('utf-8')).digest(), 'big')
+    out = []
+    for _ in range(16):
+        n, r = divmod(n, 62)
+        out.append(_ID_ALPHABET[r])
+    return ''.join(out)
+
+
+_ID_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9])[A-Za-z0-9]{16}(?![A-Za-z0-9])')
+
+def _stabilize_ids():
+    """Replace every provisional make_id() id in the staged packs by a stable one.
+
+    The ids used to be random on every run, so each regeneration broke the links
+    from users' worlds to the compendium (Compendium.… UUIDs, ARS item/NPC
+    replacement and spell "sync with source"). Now:
+      * a top-level document (item, actor, journal, table, folder) gets an id
+        hashed from pack + collection + document type + name + folder path; true
+        duplicates are told apart by a hash of their id-free content;
+      * every other generated id (embedded effects, actions, pages, results…) is
+        hashed from its document's new id + the order in which it first appears
+        in that document.
+    The mapping is applied as a whole-token text replacement across every staged
+    JSON file, so cross-pack references (itemList uuids, links) follow."""
+    if not os.path.isdir(_PACK_SRC_BASE) or not _GENERATED_IDS:
+        return
+    files = []   # (pack, path, doc)
+    for pack in sorted(_listdir(_PACK_SRC_BASE)):
+        d = os.path.join(_PACK_SRC_BASE, pack)
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(_listdir(d)):
+            if fn.endswith('.json'):
+                fp = os.path.join(d, fn)
+                with open(fp, encoding='utf-8') as fh:
+                    files.append((pack, fp, json.load(fh)))
+
+    def masked(doc):
+        txt = json.dumps(doc, sort_keys=True, ensure_ascii=False)
+        return _ID_TOKEN_RE.sub(lambda m: '<ID>' if m.group(0) in _GENERATED_IDS else m.group(0), txt)
+
+    # Folder paths per pack (folders are top-level docs of the same pack).
+    folder_name = {}
+    folder_parent = {}
+    for pack, _, doc in files:
+        if str(doc.get('_key', '')).startswith('!folders!'):
+            folder_name[doc['_id']] = doc.get('name', '')
+            folder_parent[doc['_id']] = doc.get('folder')
+    def folder_path(fid):
+        parts, seen = [], set()
+        while fid and fid in folder_name and fid not in seen:
+            seen.add(fid)
+            parts.append(folder_name[fid])
+            fid = folder_parent.get(fid)
+        return '/'.join(reversed(parts))
+
+    mapping = {}
+    groups = {}
+    for pack, fp, doc in files:
+        coll = str(doc.get('_key', '')).lstrip('!').split('!')[0]
+        key = '|'.join([pack, coll, str(doc.get('type', '')), doc.get('name', ''),
+                        folder_path(doc.get('folder'))])
+        groups.setdefault(key, []).append(doc)
+    for key, docs in groups.items():
+        if len(docs) == 1:
+            seeds = [key]
+        else:
+            import hashlib
+            ranked = sorted(docs, key=lambda d: hashlib.sha1(masked(d).encode('utf-8')).hexdigest())
+            docs = ranked
+            seeds = [f'{key}#{i}' for i in range(len(docs))]
+        for d, seed in zip(docs, seeds):
+            mapping[d['_id']] = _stable_id(seed)
+
+    # Embedded / other ids: first appearance inside the owning document.
+    for pack, fp, doc in sorted(files, key=lambda t: mapping.get(t[2]['_id'], '')):
+        top = mapping.get(doc['_id'])
+        n = 0
+        for m in _ID_TOKEN_RE.finditer(json.dumps(doc, ensure_ascii=False)):
+            tok = m.group(0)
+            if tok in _GENERATED_IDS and tok not in mapping:
+                mapping[tok] = _stable_id(f'{top}/{n}')
+                n += 1
+    if len(set(mapping.values())) != len(mapping):
+        print("  WARNING: stable id collision — keeping provisional ids.")
+        return
+
+    sub = lambda m: mapping.get(m.group(0), m.group(0))
+    for pack, fp, doc in files:
+        with open(fp, encoding='utf-8') as fh:
+            txt = fh.read()
+        new_txt = _ID_TOKEN_RE.sub(sub, txt)
+        new_fp = os.path.join(os.path.dirname(fp), f"{mapping.get(doc['_id'], doc['_id'])}.json")
+        with open(new_fp, 'w', encoding='utf-8') as fh:
+            fh.write(new_txt)
+        if new_fp != fp:
+            os.remove(fp)
+    print(f"  Stable ids: {len(mapping)} ids made reproducible across runs.")
+
+
 def _finalize_with_fvtt_cli():
     """Convert every staged JSON directory into a LevelDB pack via fvtt-cli.
 
@@ -8763,10 +8885,10 @@ def _class_ability_action_groups(name, text=''):
     icon = _class_ability_icon(name)
 
     if 'turn undead' in low:
-        return [_make_action_group('Turn Undead', icon, [
-            _make_action('Turn Undead', type_='use', targeting='template',
-                         img=icon, save_type='none'),
-        ])]
+        # ARS (2026.10.26) automates turning from the class rank's turnLevel
+        # (see _apply_turn_level); a placeholder 'use' action would only add a
+        # second, inert Turn Undead button.
+        return []
 
     if 'lay on hands' in low:
         # Heal-per-level multiplier read from the text ('N hit points per
@@ -9437,6 +9559,28 @@ def _cp_skill_link_name(cls_name, raw_skill_name):
                                            _thief_canonical_scores())
 
 
+def _apply_turn_level(class_item):
+    """Fill each rank's `turnLevel` (ARS 2026.10.26 turn-undead automation reads
+    it as the column of the turning table) from the class's own granted "Turn
+    Undead" ability: a class that gains it at level L turns as a level-1 turner
+    at L, so turnLevel = level - (L - 1) — the cleric (L=1) turns at its level,
+    the paladin (L=3) two levels lower. L is read from the itemList, i.e. from
+    the CD-ROM class text; classes without the ability keep 0."""
+    levels = []
+    for e in class_item['system'].get('itemList', []):
+        if (e.get('name') or '').strip().lower() == 'turn undead':
+            try:
+                levels.append(int(e.get('level') or 1))
+            except (TypeError, ValueError):
+                levels.append(1)
+    if not levels:
+        return
+    first = min(levels)
+    for rank in class_item['system'].get('ranks', []):
+        lvl = rank.get('level') or 0
+        rank['turnLevel'] = max(0, lvl - (first - 1)) if lvl >= first else 0
+
+
 def migrate_classes():
     """Phase 3: write the classes pack — a `class` Item per CLASS.DAT record,
     foldered by group (Warriors/Rogues/Priests/Wizards/Psionicists).
@@ -9549,6 +9693,7 @@ def migrate_classes():
             total_skill_links += 1
 
         item['system']['itemList'] = item_list_refs
+        _apply_turn_level(item)
 
         bucket = GROUP_FOLDER.get(cls.get('group', ''), None)
         if bucket:
@@ -10688,6 +10833,33 @@ def _load_phb_missile_ranges():
         out.append((toks, rng))
     _phb_missile_ranges_cache = out
     return out
+
+def _weapon_attack_modes(melee, thrown, ranged):
+    """ARS `system.attack.modes` (2026.11.02): which ways a weapon can be used.
+    All three modes are written so ARS's melee-on default never fills in; the
+    per-mode overrides stay blank (= the weapon's own attack/damage values)."""
+    def mode(on):
+        return {"enabled": bool(on), "perRound": "",
+                "damage": {"normal": "", "large": "", "type": ""}}
+    return {"melee": mode(melee), "thrown": mode(thrown), "ranged": mode(ranged)}
+
+
+def _thrown_range_for(name):
+    """PHB Table 45 range bands for a THROWN melee weapon, or None. Like
+    _missile_range_for, but the matching row must contain the weapon's category
+    word (first word of the name) and must not be a launcher row."""
+    itoks = _missile_name_tokens(name)
+    first = re.findall(r'[a-z]+', (name or '').lower())
+    if not first:
+        return None
+    best, best_n = None, -1
+    for toks, rng in _load_phb_missile_ranges():
+        if any(_RANGED_WEAPON_RE.search(t) for t in toks):
+            continue
+        if first[0] in toks and toks <= itoks and len(toks) > best_n:
+            best, best_n = rng, len(toks)
+    return best
+
 
 def _missile_range_for(name):
     """Best-effort PHB Table-45 range bands for a weapon name, or None. Matches a
@@ -12524,6 +12696,7 @@ def main():
         print(f"\n  Phase 3 skipped: {DATABASE_BASE} not found.")
 
     # ─── fvtt-cli pack ────────────────────────────────────────────────────────
+    _stabilize_ids()
     _finalize_with_fvtt_cli()
 
     # ─── Module manifest ──────────────────────────────────────────────────────
