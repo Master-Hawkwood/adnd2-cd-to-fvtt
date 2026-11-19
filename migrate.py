@@ -2592,6 +2592,104 @@ def _dmg_special_sword_description(name):
     return ''
 
 
+# ── Last-resort weapon descriptions ──────────────────────────────────────────
+# Firearm families PARTS.DAT names by mechanism; C&T describes them all under a
+# single "Firearms" entry. (Equipment category words, not rules data.)
+_FIREARM_FAMILY_RE = re.compile(r'^(flintlock|matchlock|wheellock|snaplock|hand match)\b', re.I)
+_WDESC_STOP = {'of', 'the', 'or', 'and', 'a', 'an'}
+_WDESC_BOOKS = [('AEG', 'AEG'), ('DMG', 'DMG'), ('CT', 'CT'),
+                ('CBD', 'CBD'), ('CFH', 'CFH'), ('CPRH', 'CPRH')]
+
+def _wdesc_tokens(s):
+    """Order-free word set for weapon-description matching: parentheticals,
+    magic ±N suffix and possessive/stop words dropped, plurals folded."""
+    s = re.sub(r'\s*\(.*?\)', '', s or '')
+    s = re.sub(r'\s*[+-]\d.*$', '', s).lower()
+    out = set()
+    for w in re.findall(r'[a-z0-9]+', s):
+        if w in _WDESC_STOP or len(w) < 2:
+            continue
+        if len(w) > 3 and w.endswith('s') and not w.endswith('ss'):
+            w = w[:-1]
+        out.add(w)
+    return frozenset(out)
+
+
+def _render_index_entry(entry, book_key):
+    """Cleaned HTML for an html_title_index entry (filepath or anchored slice)."""
+    if isinstance(entry, tuple):
+        fp, start, end = entry
+        src = {f.upper(): f for f in _listdir(os.path.dirname(fp))}
+        raw = open(fp, 'r', encoding='cp1252').read()[start:end]
+        soup = BeautifulSoup(f'<html><body>{raw}</body></html>', 'html.parser')
+        return _clean_html_body(soup.find('body') or soup, soup, book_key, src)
+    src = {f.upper(): f for f in _listdir(os.path.dirname(entry))}
+    return clean_html_file(entry, book_key, src)
+
+
+_wdesc_sources_cache = None
+def _wdesc_sources():
+    """[(source_label, [(tokens, kind, payload)])] in priority order: AEG titles,
+    DMG titles, the C&T weapon glossary, C&T titles, then the Dwarves / Fighter /
+    Priest handbooks. kind 'html' = ready HTML, 'entry' = index entry to render."""
+    global _wdesc_sources_cache
+    if _wdesc_sources_cache is not None:
+        return _wdesc_sources_cache
+    out = []
+    for book, prefix in _WDESC_BOOKS:
+        idx = html_title_index(book, prefix)
+        items = [(_wdesc_tokens(k), 'entry', (v, book))
+                 for k, v in sorted(idx.items()) if '|' not in k]
+        if book == 'CT':   # glossary entries first, then the chapter titles
+            gl = [(_wdesc_tokens(' '.join(t)), 'html', h)
+                  for t, h in _load_ct_item_descriptions('weapon')]
+            out.append(('CT glossary', gl))
+        out.append((book, items))
+    _wdesc_sources_cache = out
+    return out
+
+
+def _weapon_description_fallback(name):
+    """Description for a weapon every exact lookup missed ("Mace, footman's" vs
+    AEG "Footman's Mace", "Staff of Magi" vs DMG "Staff of the Magi", "Knee
+    spike" vs "Knee and Elbow Spikes"). Words are compared order-free; a source
+    title qualifies when it contains every word of the name and at most ONE
+    other word (so "Rock" never grabs "Transmute Rock to Mud"). Sources are
+    tried in priority order; within a source the match must be unique, else
+    nothing is returned. A trailing ", variant" is dropped on a second pass."""
+    tries = [name]
+    if ',' in name:
+        tries.append(name.rsplit(',', 1)[0])
+    if _FIREARM_FAMILY_RE.match(name):
+        tries.append('firearms')
+    for t in tries:
+        want = _wdesc_tokens(t)
+        if not want:
+            continue
+        for _label, items in _wdesc_sources():
+            best, best_extra, tie = None, None, False
+            for toks, kind, payload in items:
+                if not want <= toks:
+                    continue
+                extra = len(toks - want)
+                if extra > 1:
+                    continue
+                if best is None or extra < best_extra:
+                    best, best_extra, tie = (kind, payload), extra, False
+                elif extra == best_extra and (kind, payload) != best:
+                    tie = True
+            if best is None:
+                continue
+            if tie:
+                break          # ambiguous in the best source: give up on this form
+            kind, payload = best
+            try:
+                return payload if kind == 'html' else _render_index_entry(*payload)
+            except Exception:
+                return ''
+    return ''
+
+
 def _item_dmg_magic_description(name):
     """Tightened DMG lookup for magic 'item' records the generic chain misses
     because of trailing variant qualifiers ("Ring of Wizardry, 3rd", "Boots of
@@ -5526,6 +5624,9 @@ def make_part_item(part, img_path=None, base_weapons=None):
     # match like "Sword." backstops base/unmatched items).
     if not description and ftype in ('weapon', 'armor'):
         description = _ct_item_description(part['name'], ftype)
+    # Last resort for weapons: word-based search over the equipment sources.
+    if not description and ftype == 'weapon':
+        description = _weapon_description_fallback(part['name'])
     # Magic 'item' records (rings, amulets, boots, bags…) whose trailing variant
     # qualifier defeated the generic DMG lookup above.
     if not description and ftype == 'item':
@@ -12641,6 +12742,13 @@ def main():
     journals pack, then Phases 3-5 (the migrate_* drivers) into their packs,
     write module.json, and print a summary. Phase 3+ is skipped gracefully if the
     DATABASE/ directory is absent."""
+    # Progress messages use non-ASCII characters (→, ✓). On Windows, output
+    # redirected to a file or pipe defaults to cp1252 and would crash on them.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
     print("AD&D 2e Migration")
     _normalize_source_case()
     _check_cdrom_version()
