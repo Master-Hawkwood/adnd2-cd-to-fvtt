@@ -10072,6 +10072,26 @@ _ITEM_SPELL_POWERS = {
     2237: [(39, 'uses', r'up to (\w+) times')],                             # Ventriloquism
     **{i: [(121, 'potion', _P)] for i in range(2385, 2403)},               # Dragon / Giant Control
     **{i: [(7, 'potion', _P)] for i in range(2409, 2427)},                 # Undead / Human Control
+    # ── Batch 2 (2026-11-19): other items whose text ties the effect to a spell
+    2306: [(7, 'free', _P)],                                                # Eyes of Charming
+    2373: [(115, 'free', _P)],                                              # Helm of Telepathy
+    2148: [(122, 'charge', _P)],                                            # Scarab of Insanity
+    2227: [(115, 'potion', _P)],                                            # Philter of Persuasiveness
+    2197: [(86, 'potion', _P)],                                             # Potion of Clairaudience
+    2650: [(60, 'uses', r'equal to 1/(\d+) of the contents')],              # Potion of Invisibility
+    2215: [(65, 'potion', _P)],                                             # Potion of Levitation
+    2231: [(151, 'potion', _P)],                                            # Potion of Polymorph Self
+    2213: [(7, 'potion', _P)],                                              # Potion of Human Control
+    1362: [(39, 'uses', r'up to (\w+) times')],                            # Ventriloquism (2nd record)
+    # Boots of Levitation (all weight variants): the text points to the spell.
+    **{i: [(65, 'free', _P)] for i in (2010, *range(2558, 2578))},
+    # Medallions of ESP / Thought Projection: the text calls the effect the
+    # "ESP path" (and Thought Projection works "like an ESP Medallion").
+    **{i: [(52, 'free', _P)] for i in (2130, 2131, *range(2463, 2471))},
+    # Not stated on the CD; the 2e retro-clone For Gold and Glory ties both
+    # to the plane shift spell (checked 2026-11-19).
+    2117: [(503, 'free', _P)],    # Amulet of the Planes
+    2079: [(503, 'free', _P)],    # Robe of Stars (astral travel)
 }
 
 # PARTS.DAT records with no description of their own that share another
