@@ -5778,27 +5778,20 @@ def make_part_item(part, img_path=None, base_weapons=None):
     # Every potion gets a "Quaff" action group so it's actually usable from the
     # sheet instead of sitting inert until drunk (OSRIC gives 88/89 potions a
     # use action). A `use` action drinks-and-consumes one potion (resource type
-    # "item"); heal/damage actions are added when the description text states the
-    # dice. The richer per-effect changes (Giant Strength → STR, etc.) are
-    # hand-authored game data in OSRIC and remain out of scope.
+    # "item"). Heal/damage actions come only from the curated
+    # _ITEM_MECHANIC_ACTIONS table (applied in migrate_items).
     if ftype == 'potion':
         quaff_icon = img_path or 'icons/svg/item-bag.svg'
         quaff_actions = [_make_action('Drink', type_='use', targeting='self',
                                       img=quaff_icon, consume_item=True)]
-        quaff_actions += _mechanic_actions(description, part['name'])
         system["actionGroups"] = [_make_action_group('Quaff', quaff_icon,
                                                      quaff_actions)]
     # Other activated magic items (oils, scrolls, wands, dust, horns…) get a
-    # use/activate action, plus heal/damage actions parsed from their text.
+    # use/activate action; heal/damage actions come from _ITEM_MECHANIC_ACTIONS.
     if ftype == 'item':
-        extra = _mechanic_actions(description, part['name'])
         _mag_ag = _magic_item_action_group(part['name'], img_path)
         if _mag_ag:
-            _mag_ag['actions'].extend(extra)
             system["actionGroups"] = [_mag_ag]
-        elif extra:
-            system["actionGroups"] = [_make_action_group(
-                'Use', img_path or 'icons/svg/item-bag.svg', extra)]
 
     flags = {"adnd2": {"partId": part.get('item_id')}}
     if part.get('restricted_classes'):
@@ -10189,6 +10182,127 @@ def _add_item_spell_powers(item, part_index):
         added += 1
     return added
 
+# ── Curated non-spell actions of magic items (lot 3, 2026-11-19) ─────────────
+# Same rule as _ITEM_SPELL_POWERS: which item gets which action is decided once,
+# by hand, from the CD text (the CD will never change); only references are
+# hardcoded (PARTS.DAT index, a regex anchor around the dice). The dice, bonuses
+# and use counts themselves are read from the item's own description at build
+# time. Each entry is a group:
+#   group  - action group name; actions are appended to an existing group of
+#            that name (Quaff / Use / Activate) or a new group is created
+#   res    - optional (kind, anchor) resource set on the group's first action,
+#            kinds as in _ITEM_SPELL_POWERS (charge / daily / weekly / uses);
+#            when the group has several actions (alternative damage rolls), a
+#            leading 'use' action named after the group carries it
+#   acts   - (name, type, anchor, damage type[, options]) per action; the anchor
+#            captures the formula. Options: plus (anchor of a bonus added to the
+#            formula), cost (anchor of the charges spent by that action; '{n}' in
+#            the name is replaced by it), all (one action per match: group 1 is
+#            put in the name as '{n}', group 2 is the formula).
+_MD = r'(\d+d\d+(?:\s*[+-]\s*\d+)?)'
+_HEAL_POTION = [dict(group='Quaff', acts=[('Heal', 'heal', r'restores ' + _MD + r' hit points', '')])]
+_ITEM_MECHANIC_ACTIONS = {
+    2211: _HEAL_POTION,                                     # Potion of Healing
+    4565: [dict(group='Use', acts=_HEAL_POTION[0]['acts'])],   # Healing (2nd record, not typed as a potion)
+    2206: _HEAL_POTION,                                     # Potion of Extra-healing
+    2044: [dict(group='Use', acts=[('Heal', 'heal', r'ointment heals ' + _MD, '')])],   # Keoghtom's Ointment
+    2240: [dict(group='Quaff', acts=[                       # Potion of Fire Breath
+        ('Fire Breath', 'damage', r'long that inflicts ' + _MD, 'fire'),
+        ('Fire Breath (whole potion)', 'damage', r'and inflicts ' + _MD + r' points of damage\. Saving', 'fire')])],
+    2123: [dict(group='Use', acts=[('Damage', 'damage', r'force that inflicts ' + _MD, 'force')])],   # Beads of Force
+    2181: [dict(group='Activate', acts=[('Damage', 'damage', r'sustain ' + _MD + r' points', '')])],  # Horn of Blasting
+    2038: [dict(group='Use', acts=[('Damage', 'damage', r'still inflicts ' + _MD, '')])],             # Dust of Dryness
+    2347: [dict(group='Activate', acts=[('Damage', 'damage', r'roll inflicts ' + _MD, '')])],         # Wand of Flame Extinguishing
+    2220: [dict(group='Use', acts=[                         # Oil of Fiery Burning
+        ('Damage', 'damage', r'inflicting ' + _MD + r' points of damage to any creature directly', 'fire')])],
+    2079: [dict(group='Star', acts=[                        # Robe of Stars
+        ('Star', 'damage', r'base damage is ' + _MD, '', {'plus': r'weapon of \+(\d+) value'})])],
+    2268: [dict(group='Shocking Grasp', acts=[              # Ring of Shocking Grasp
+        ('Damage', 'damage', r'deliverers ' + _MD, 'lightning')])],
+    2266: [dict(group='Ram', acts=[                         # Ring of the Ram
+        ('Ram ({n})', 'damage', r'for ' + _MD + r' points of damage if one charge', '', {'cost': r'if (\w+) charge is expended'}),
+        ('Ram ({n})', 'damage', _MD + r' points if two charges', '', {'cost': r'points if (\w+) charges are used'}),
+        ('Ram ({n})', 'damage', r'or ' + _MD + r' points if three charges', '', {'cost': r'or \S+ points if (\w+) charges'})])],
+    2349: [dict(group='Sunburst', res=('charge', r'requires (\w+) charges\. The wand can be recharged'),
+                acts=[('Sunburst', 'damage', r'undead within this globe suffer ' + _MD, '')])],   # Wand of Illumination
+    2370: [dict(group='Light vs Undead', acts=[             # Helm of Brilliance
+        ('Damage', 'damage', r'causes pain and ' + _MD, '')])],
+    2293: [dict(group='Pincers', acts=[('Pincer', 'damage', r'snap for ' + _MD, '')])],   # Apparatus of Kwalish
+    2269: [dict(group='Ball Lightning', res=('daily', r'Ball lightning, as described below \((\w+) per'),   # Ring of Shooting Stars
+                acts=[('Ball Lightning ({n})', 'damage', r'', 'lightning',
+                       {'all': r'(\d+) lightning balls? (\d+d\d+) points damage'})]),
+           dict(group='Shooting Star', res=('weekly', r'(\w+) shooting stars can be released from the ring each week'),
+                acts=[('Impact', 'damage', r'impact for (\d+) points of damage', 'fire'),
+                      ('Burst', 'damage', r'sphere for (\d+) points of damage', 'fire')])],
+}
+
+
+def _add_item_mechanic_actions(item, part_index):
+    """Add the curated heal/damage actions of _ITEM_MECHANIC_ACTIONS to a magic
+    item. Returns the number of actions added."""
+    groups = _ITEM_MECHANIC_ACTIONS.get(part_index)
+    if not groups:
+        return 0
+    text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', item['system'].get('description', '')))
+    icon = item.get('img') or 'icons/svg/item-bag.svg'
+    added = 0
+    for spec in groups:
+        acts = []
+        for entry in spec['acts']:
+            name, type_, anchor, dtype = entry[:4]
+            opts = entry[4] if len(entry) > 4 else {}
+            found = []
+            if opts.get('all'):
+                found = [(m.group(1), m.group(2)) for m in re.finditer(opts['all'], text, re.I)]
+            else:
+                m = re.search(anchor, text, re.I)
+                if m:
+                    formula = re.sub(r'\s+', '', m.group(1))
+                    if opts.get('plus'):
+                        b = _anchor_number(text, opts['plus'])
+                        if b:
+                            formula += f'+{b}'
+                    found = [(_anchor_number(text, opts['cost']) if opts.get('cost') else '', formula)]
+            if not found:
+                print(f"  WARNING: item action — anchor not found in {item['name']}: {name}")
+                continue
+            for n, formula in found:
+                act = _make_action(name.replace('{n}', str(n)), type_=type_,
+                                   targeting='self' if type_ == 'heal' else 'single',
+                                   formula=formula, damage_type=dtype,
+                                   img=_ACTION_HEAL_ICON if type_ == 'heal' else _ACTION_DMG_ICON)
+                if opts.get('cost') and n:
+                    act['resource'].update({'type': 'powered', 'itemId': '', 'reusetime': '', 'trackTime': 0})
+                    act['resource']['count'].update({'cost': n, 'min': 0, 'max': 1, 'value': 0})
+                acts.append(act)
+        if not acts:
+            continue
+        if spec.get('res'):
+            if len(acts) > 1:
+                acts.insert(0, _make_action(spec['group'], type_='use', targeting='self', img=icon))
+            kind, anchor = spec['res']
+            n = _anchor_number(text, anchor)
+            if n is None:
+                print(f"  WARNING: item action — use count not found in {item['name']}: {spec['group']}")
+            res = acts[0]['resource']
+            res.update({'itemId': '', 'trackTime': 0, 'reusetime': ''})
+            res['count'].update({'min': 0, 'value': 0})
+            if kind == 'charge':
+                res['type'] = 'powered'
+                res['count'].update({'cost': n or 1, 'max': 1})
+            else:
+                res['type'] = 'charged'
+                res['reusetime'] = {'daily': 'daily', 'weekly': 'weekly'}.get(kind, '')
+                res['count'].update({'cost': 1, 'max': n or 1})
+        target = next((g for g in item['system'].setdefault('actionGroups', [])
+                       if g.get('name') == spec['group']), None)
+        if target:
+            target.setdefault('actions', []).extend(acts)
+        else:
+            item['system']['actionGroups'].append(_make_action_group(spec['group'], icon, acts))
+        added += len(acts)
+    return added
+
 
 def migrate_items():
     """Phase 3: write the items pack from PARTS.DAT — weapon/armor/potion/item,
@@ -10235,6 +10349,7 @@ def migrate_items():
     effects_written = 0
     skipped_nonitem = 0
     powers_added = 0
+    mech_added = 0
     desc_by_index = {}
     for part_index, part in enumerate(parts):
         if _is_non_item_part(part['name']):   # S&P build data, not equipment
@@ -10247,6 +10362,7 @@ def migrate_items():
         if src is not None and not desc_by_index[part_index].strip():
             item['system']['description'] = desc_by_index.get(src, '')
         powers_added += _add_item_spell_powers(item, part_index)
+        mech_added += _add_item_mechanic_actions(item, part_index)
         bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
         item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
@@ -10259,6 +10375,8 @@ def migrate_items():
             print(f"    {count} items...")
     if powers_added:
         print(f"  {powers_added} spell powers added to magic items")
+    if mech_added:
+        print(f"  {mech_added} curated heal/damage actions added to magic items")
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
@@ -11064,64 +11182,8 @@ def _potion_description_and_heal(name):
     return html, (re.sub(r'\s+', '', m.group(1)) if m else '')
 
 
-# ── Mechanics parsed from item/potion description prose → rollable actions ────
-# When the rules text states dice ("restores 2d4+2 hit points", "inflicts 6d6
-# points of damage"), generate the matching heal/damage action so the item is
-# rollable, not just a trigger. Guards against the two ways "N points of damage"
-# misleads: reader-penalty tomes, and ingestion side-effects ("consumption
-# causes …"). Save/duration are left to the description (no negate/half data).
-_MECH_DICE = r'(\d+d\d+(?:\s*[+-]\s*\d+)?)'
-_MECH_HEAL_RE = re.compile(
-    r'(?:restores?|cures?|heals?|regenerates?)\s+(?:up to\s+)?' + _MECH_DICE +
-    r'\s+(?:hit\s+points|points?\s+of\s+(?:damage|wounds))', re.I)
-_MECH_DMG_RE = re.compile(
-    r'(?:inflicts?|deals?|causes?|does|strikes? for)\s+' + _MECH_DICE +
-    r'\s+(?:points?\s+of\s+)?([a-z]+\s+)?damage', re.I)
-_MECH_DMG_EXNAME = re.compile(r'\b(book|tome|manual|libram)\b', re.I)
-_MECH_DMG_INGEST = re.compile(
-    r'consumption|spoonful|if (?:drunk|eaten|swallow)|mistaken for', re.I)
-_MECH_DMG_TYPES = {'fire': 'fire', 'cold': 'cold', 'frost': 'cold', 'acid': 'acid',
-                   'lightning': 'lightning', 'electrical': 'lightning',
-                   'electricity': 'lightning', 'force': 'force', 'poison': 'poison'}
-
-def _item_action_mechanics(description, name):
-    """(heal_formula, damage_formula, damage_type) parsed from an item/potion
-    description, each '' when absent."""
-    text = ' '.join(BeautifulSoup(description or '', 'html.parser')
-                    .get_text(' ').split())
-    heal = ''
-    m = _MECH_HEAL_RE.search(text)
-    if m:
-        heal = re.sub(r'\s+', '', m.group(1))
-    dmg = dtype = ''
-    if not _MECH_DMG_EXNAME.search(name):
-        for m in _MECH_DMG_RE.finditer(text):
-            seg = text[max(0, m.start() - 40):m.start()]
-            if re.search(r'restores?|cures?|heals?|regenerat', seg, re.I):
-                continue
-            if _MECH_DMG_INGEST.search(seg):
-                continue
-            dmg = re.sub(r'\s+', '', m.group(1))
-            dtype = _MECH_DMG_TYPES.get((m.group(2) or '').strip().lower(), '')
-            break
-    return heal, dmg, dtype
-
 _ACTION_DMG_ICON = 'systems/ars/icons/general/DamageColor.png'
 _ACTION_HEAL_ICON = 'icons/svg/heal.svg'
-
-def _mechanic_actions(description, name):
-    """Heal/damage action objects parsed from the description (possibly empty)."""
-    heal, dmg, dtype = _item_action_mechanics(description, name)
-    acts = []
-    if heal:
-        acts.append(_make_action('Heal', type_='heal', targeting='self',
-                                 formula=heal, img=_ACTION_HEAL_ICON))
-    if dmg:
-        acts.append(_make_action('Damage', type_='damage', targeting='single',
-                                 formula=dmg, damage_type=dtype,
-                                 img=_ACTION_DMG_ICON))
-    return acts
-
 
 # ── Ranged-weapon typing (PHB Table 45 — Missile Weapon Ranges, PHB00220) ────
 # Word-boundary keywords for launcher weapons (bows, crossbows, slings, blowgun,
