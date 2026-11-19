@@ -56,6 +56,8 @@ import random
 import string
 import struct
 import subprocess
+import tempfile
+import atexit
 from html.parser import HTMLParser
 import datetime
 from typing import Any
@@ -12081,6 +12083,128 @@ def migrate_book(book_config, folder_id, db, stats, book_sort=0):
         stats['journals'] += 1
 
 
+# ─── Case-insensitive source tree ─────────────────────────────────────────────
+# The CD-ROM stores every name in upper case (PHB/PHB00219.HTM, DATABASE/CLASS.DAT)
+# and the whole script is written against that spelling. On a case-sensitive
+# filesystem (Linux, some macOS volumes) the same tree often shows up in lower
+# case — a Linux ISO9660 mount defaults to `map=normal`, which lower-cases names —
+# or half-renamed by hand. Every hard-coded path then misses, silently: the
+# loaders treat a missing file as "no data" (issues #17, #18).
+#
+# Rather than patching each of the many path constructions, the source trees are
+# normalised once, at startup: when a tree holds non-upper-case names on a
+# case-sensitive filesystem, it is mirrored into a temporary directory whose
+# names are all upper case (real directories, symlinked files — nothing is
+# copied), and the *_BASE constants are pointed at the mirror. On Windows and
+# other case-insensitive filesystems, or on a tree that is already upper case,
+# nothing happens.
+
+def _ci_resolve(path):
+    """Return the existing path that matches `path` case-insensitively, walking
+    it segment by segment (e.g. "cd-rom/MACBOOKS/HTML" → "cd-rom/macbooks/html"),
+    or None if some segment has no match."""
+    if os.path.exists(path):
+        return path
+    parts = os.path.normpath(path).split(os.sep)
+    cur = os.sep if os.path.isabs(path) else ''
+    for part in parts:
+        if part in ('', '.'):
+            continue
+        cand = os.path.join(cur, part) if cur else part
+        if not os.path.exists(cand):
+            try:
+                names = os.listdir(cur or '.')
+            except OSError:
+                return None
+            match = next((n for n in names if n.upper() == part.upper()), None)
+            if match is None:
+                return None
+            cand = os.path.join(cur, match) if cur else match
+        cur = cand
+    return cur
+
+
+def _tree_needs_case_mirror(root):
+    """True if `root` contains a name that is not upper case AND the filesystem
+    is case-sensitive (the upper-case spelling of that name does not resolve)."""
+    if os.path.basename(os.path.normpath(root)) != os.path.basename(os.path.normpath(root)).upper():
+        probe = os.path.join(os.path.dirname(os.path.normpath(root)),
+                             os.path.basename(os.path.normpath(root)).upper())
+        if not os.path.exists(probe):
+            return True
+    for dirpath, dirs, files in os.walk(root):
+        for name in dirs + files:
+            if name != name.upper():
+                return not os.path.exists(os.path.join(dirpath, name.upper()))
+    return False
+
+
+def _link_or_copy(src, dst):
+    """Symlink `dst` → `src`; fall back to a hard link, then to a copy, where
+    symlinks are not permitted."""
+    try:
+        os.symlink(src, dst)
+    except (OSError, NotImplementedError):
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+
+
+def _build_case_mirror(root, dest):
+    """Recreate `root` under `dest` with every directory and file name upper-cased.
+    Returns (n_files, collisions) — collisions are names that differ only by case
+    (the first one seen wins)."""
+    n_files, collisions = 0, []
+    src_root = os.path.abspath(root)
+    for dirpath, dirs, files in os.walk(src_root):
+        dirs.sort(); files.sort()
+        rel = os.path.relpath(dirpath, src_root)
+        out_dir = dest if rel == '.' else os.path.join(
+            dest, *(seg.upper() for seg in rel.split(os.sep)))
+        os.makedirs(out_dir, exist_ok=True)
+        for f in files:
+            link = os.path.join(out_dir, f.upper())
+            if os.path.lexists(link):
+                collisions.append(os.path.join(rel, f))
+                continue
+            _link_or_copy(os.path.join(dirpath, f), link)
+            n_files += 1
+    return n_files, collisions
+
+
+def _normalize_source_case():
+    """Point SOURCE_BASE / DATABASE_BASE / BITMAPS_BASE at an upper-case view of
+    the user's CD-ROM tree when the filesystem is case-sensitive and the tree is
+    not already upper case. ERRATA_BASE is only resolved (its files are found by
+    walking the tree, never by exact name)."""
+    global SOURCE_BASE, DATABASE_BASE, BITMAPS_BASE, ERRATA_BASE
+    errata = _ci_resolve(ERRATA_BASE)
+    if errata:
+        ERRATA_BASE = errata
+    mirror_root = None
+    for name in ('SOURCE_BASE', 'DATABASE_BASE', 'BITMAPS_BASE'):
+        configured = globals()[name]
+        actual = _ci_resolve(configured)
+        if actual is None:
+            continue  # absent: the phase that needs it reports it as usual
+        if not _tree_needs_case_mirror(actual):
+            globals()[name] = actual
+            continue
+        if mirror_root is None:
+            mirror_root = tempfile.mkdtemp(prefix='adnd2-cdrom-')
+            atexit.register(shutil.rmtree, mirror_root, True)
+        dest = os.path.join(mirror_root, name)
+        n_files, collisions = _build_case_mirror(actual, dest)
+        print(f"  Case-sensitive filesystem: '{actual}' is read through an "
+              f"upper-case view ({n_files} files).")
+        for c in collisions[:10]:
+            print(f"    WARNING: '{c}' differs from another file only by case — ignored.")
+        if len(collisions) > 10:
+            print(f"    WARNING: … and {len(collisions) - 10} more case collisions.")
+        globals()[name] = dest
+
+
 def _check_cdrom_version():
     """Warn if CLASS.DAT MD5 doesn't match the tested CD-ROM version.
 
@@ -12130,8 +12254,9 @@ def main():
     journals pack, then Phases 3-5 (the migrate_* drivers) into their packs,
     write module.json, and print a summary. Phase 3+ is skipped gracefully if the
     DATABASE/ directory is absent."""
-    _check_cdrom_version()
     print("AD&D 2e Migration")
+    _normalize_source_case()
+    _check_cdrom_version()
     print(f"Output: {OUTPUT_DB}")
 
     os.makedirs(OUTPUT_IMG, exist_ok=True)

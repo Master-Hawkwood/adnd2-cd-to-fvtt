@@ -69,6 +69,12 @@ your-working-dir/
     BITMAPS/      ← icon sprite sheets
 ```
 
+**File name case (Linux / macOS):** the CD-ROM stores its names in upper case, but
+a copy made from a Linux mount is often lower case (an ISO9660 mount lower-cases
+names by default). You do **not** need to rename anything: on a case-sensitive
+filesystem the script detects non-upper-case names and reads the tree through a
+temporary upper-case view (it prints `Case-sensitive filesystem: … upper-case view`).
+
 **2. Configure paths** *(if your layout differs)*
 
 Open `migrate.py` and adjust the constants at the top of the file:
