@@ -1210,7 +1210,63 @@ def parse_classes():
     for k in range(len(starts) - 1):
         r = parse_class_record(buf, starts[k], starts[k+1])
         if r: out.append(r)
+    _reconcile_classes_with_phb(out)
     return out
+
+
+# ── CLASS.DAT cross-check against the PHB group tables (issue #19) ──────────
+# A few CLASS.DAT records carry values the PHB contradicts: Enchanter and
+# Geometer gain 11 hp per level past 10th instead of the wizard's 1, and the
+# Bard has the wrong weapon-slot row. The PHB tables are the reference for the
+# four PHB groups, read here at build time: the hit-dice column of the
+# experience tables ("9+3" = last HD level + hp per later level; Tables 14, 20,
+# 23, 25) and Table 34 (proficiency slots). Only the hard-coded file names and
+# group words are references; every value comes from the user's CD. The
+# starting nonweapon slots are left to CLASS.DAT (the Geometer's extra ones come
+# from its own book). Psionicists are in no PHB table and are not touched.
+_PHB_GROUP_XP_TABLES = {'warrior': 'PHB00055.HTM', 'wizard': 'PHB00065.HTM',
+                        'priest': 'PHB00073.HTM', 'rogue': 'PHB00094.HTM'}
+_PHB_PROF_SLOTS_TABLE = 'PHB00119.HTM'
+_phb_group_rules_cache = None
+_reconcile_reported = set()
+
+def _phb_table_text(fn):
+    path = os.path.join(SOURCE_BASE, 'PHB', fn)
+    if not os.path.exists(path):
+        return ''
+    t = open(path, encoding='cp1252', errors='replace').read()
+    return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', t))
+
+def _phb_group_rules():
+    """{group: {field: value}} read from the PHB group tables (may be empty)."""
+    global _phb_group_rules_cache
+    if _phb_group_rules_cache is not None:
+        return _phb_group_rules_cache
+    rules = {}
+    for group, fn in _PHB_GROUP_XP_TABLES.items():
+        m = re.search(r'\b(\d+)\+(\d+)\b', _phb_table_text(fn))
+        if m:
+            rules.setdefault(group, {}).update(
+                {'hit_dice_cap': int(m.group(1)), 'hp_after_cap': int(m.group(2))})
+    text = _phb_table_text(_PHB_PROF_SLOTS_TABLE)
+    for m in re.finditer(r'\b(Warrior|Wizard|Priest|Rogue) (\d+) (\d+) (-\d+) (\d+) (\d+)\b', text):
+        rules.setdefault(m.group(1).lower(), {}).update({
+            'wp_starting': int(m.group(2)), 'wp_gain_level': int(m.group(3)),
+            'wp_penalty': int(m.group(4)), 'nwp_gain_level': int(m.group(6))})
+    _phb_group_rules_cache = rules
+    return rules
+
+def _reconcile_classes_with_phb(classes):
+    """Replace CLASS.DAT values that contradict their group's PHB tables."""
+    rules = _phb_group_rules()
+    for cls in classes:
+        for field, value in rules.get(cls.get('group'), {}).items():
+            if field in cls and cls[field] != value:
+                if (cls.get('name'), field) not in _reconcile_reported:
+                    _reconcile_reported.add((cls.get('name'), field))
+                    print(f"  {cls.get('name')}: CLASS.DAT {field}={cls[field]} contradicts "
+                          f"the PHB {cls.get('group')} table ({value}) — using the PHB value")
+                cls[field] = value
 
 
 # PARTS.DAT — MFC CArchive, CPart + CPartKitOb records
