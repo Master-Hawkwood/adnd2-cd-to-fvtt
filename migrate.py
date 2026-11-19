@@ -296,7 +296,7 @@ def build_chapters(book_dir, book_prefix, toc_entries):
     and treat each match as a boundary. Files before the first boundary become a
     "Foreword"; if nothing is found, everything goes in one "Content" chapter."""
     all_files = sorted([
-        f for f in os.listdir(book_dir)
+        f for f in _listdir(book_dir)
         if f.upper().startswith(book_prefix) and f.upper().endswith('.HTM')
            and f.upper() != f'{book_prefix}00000.HTM'
     ])
@@ -609,7 +609,8 @@ def _errata_index():
     index = {}
     if os.path.isdir(ERRATA_BASE):
         for root, _dirs, files in os.walk(ERRATA_BASE):
-            for fn in files:
+            _dirs.sort(key=lambda n: (n.upper(), n))   # platform-independent order
+            for fn in sorted(files, key=lambda n: (n.upper(), n)):
                 if not fn.lower().endswith(('.htm', '.html')):
                     continue
                 fp = os.path.join(root, fn)
@@ -837,7 +838,7 @@ def _monsters_dir():
     global _monsters_dir_cache
     if _monsters_dir_cache is None:
         d = os.path.join(BITMAPS_BASE, 'MONSTERS')
-        _monsters_dir_cache = {f.upper(): f for f in os.listdir(d)} if os.path.isdir(d) else {}
+        _monsters_dir_cache = {f.upper(): f for f in _listdir(d)} if os.path.isdir(d) else {}
     return _monsters_dir_cache
 
 
@@ -867,7 +868,7 @@ def _portrait_dir():
     global _portrait_dir_cache
     if _portrait_dir_cache is None:
         d = os.path.join(BITMAPS_BASE, 'PORTRAIT')
-        _portrait_dir_cache = {f.upper(): f for f in os.listdir(d)} if os.path.isdir(d) else {}
+        _portrait_dir_cache = {f.upper(): f for f in _listdir(d)} if os.path.isdir(d) else {}
     return _portrait_dir_cache
 
 
@@ -1549,7 +1550,7 @@ def _kit_html_index():
         d = os.path.join(SOURCE_BASE, book)
         if not os.path.isdir(d):
             continue
-        for f in sorted(os.listdir(d)):
+        for f in sorted(_listdir(d)):
             if not f.upper().endswith('.HTM'):
                 continue
             try:
@@ -1655,7 +1656,7 @@ def _race_book_class_map(book):
     d = os.path.join(SOURCE_BASE, book)
     mapping, cur = {}, None
     if os.path.isdir(d):
-        for f in sorted(os.listdir(d)):
+        for f in sorted(_listdir(d)):
             if not f.upper().endswith('.HTM'):
                 continue
             try:
@@ -2085,9 +2086,10 @@ _PER_SPELL_TITLE_RE = re.compile(
 # so the first spell in each level group has </FONT><FONT ...><B>Name</B>.
 _ANCHORED_SPELL_RE = re.compile(
     r'<A\s+NAME="([^"]+)"\s*></A>'   # the anchor
+    r'(?:\s*<A\s+NAME="[^"]+"\s*></A>)*'  # duplicated anchor (first spell of priest pages)
     r'(?:\s*</FONT>)?'               # optional closing FONT (first-in-series pages)
     r'(?:\s*<FONT[^>]*>)?'           # optional opening FONT wrapper
-    r'\s*<B>\s*([^<]+?)\s*</B>',     # the spell name
+    r'\s*<B>\s*([^<]+?)\s*(?:<P>\s*</P>\s*)?</B>',  # the spell name (+ stray empty <P>)
     re.I,
 )
 
@@ -2130,7 +2132,17 @@ def html_title_index(book_key, prefix):
         _html_indices[cache_key] = {}
         return _html_indices[cache_key]
     index = {}                  # key → (priority, entry)
-    for filename in os.listdir(book_dir):
+
+    def _put(key, priority, entry, page_cls, replace_if):
+        # Store under the bare spell name AND, when the page says which list
+        # it belongs to, under "name|wizard" / "name|priest": 51 spells exist in
+        # both lists with different stats, and a bare-name key can hold only one.
+        for k in ([key, f'{key}|{page_cls}'] if page_cls else [key]):
+            cur = index.get(k)
+            if cur is None or replace_if(cur[0]):
+                index[k] = (priority, entry)
+
+    for filename in _listdir(book_dir):
         if not (filename.upper().startswith(prefix)
                 and filename.upper().endswith('.HTM')):
             continue
@@ -2140,13 +2152,16 @@ def html_title_index(book_key, prefix):
         try:
             title = extract_title(filepath).strip()
             name = title.split('--')[0].strip()
+            # Spell list of the page: per-spell pages ("X-- 4th Level Wizard
+            # Spell") and compilation pages ("Fourth-Level Spells-- Wizard").
+            m_cls = (_PER_SPELL_TITLE_RE.search(title)
+                     or re.search(r'--\s*(Wizard|Priest)\b', title, re.I))
+            page_cls = m_cls.group(1).lower() if m_cls else None
             if name:
                 # Priority 3 = per-spell descriptive page; 1 = anything else.
                 priority = 3 if _PER_SPELL_TITLE_RE.search(title) else 1
-                key = name.lower()
-                cur = index.get(key)
-                if cur is None or priority > cur[0]:
-                    index[key] = (priority, filepath)
+                _put(name.lower(), priority, filepath, page_cls,
+                     lambda cur_p, p=priority: p > cur_p)
             # Now scan for anchored spells inside this page (priority 2).
             # Many PHB compilation pages put each spell behind a separate
             # <A NAME></A><B>SpellName</B> anchor, even single-spell pages
@@ -2166,9 +2181,7 @@ def html_title_index(book_key, prefix):
                 end = all_anchors[i+1].start() if i+1 < len(all_anchors) else len(raw)
                 # Normalize typographic apostrophes so keys match ASCII DAT names.
                 key = aname.lower().replace('’', "'").replace('‘', "'").replace('\x92', "'")
-                cur = index.get(key)
-                if cur is None or cur[0] < 2:
-                    index[key] = (2, (filepath, start, end))
+                _put(key, 2, (filepath, start, end), page_cls, lambda cur_p: cur_p < 2)
             # ── CWH / CFH / CBT / CPRH: blue SIZE=3 bold spell names (no <A NAME>) ──
             # Run after anchor scanners so per-spell pages still take priority.
             cwh_markers = list(_CWH_SPELL_RE.finditer(raw))
@@ -2393,26 +2406,30 @@ def _normalize_spell_name_for_lookup(name):
     return keys
 
 
-def lookup_html_description(name, books):
+def lookup_html_description(name, books, spell_list=None):
     """Lookup an HTML description by name across multiple books. Tries the
     progressive normalization keys from _normalize_spell_name_for_lookup,
     in book search order. Returns cleaned HTML string or '' if not found.
 
     Index entries are either a filepath (whole-file clean) or a tuple
     `(filepath, start_offset, end_offset)` for an anchored slice inside a
-    multi-spell compilation page — sliced and cleaned the same way."""
+    multi-spell compilation page — sliced and cleaned the same way.
+
+    `spell_list` ('wizard' / 'priest') prefers the page of that spell list for
+    names that exist in both (e.g. a wizard and a priest spell of the same name)."""
     if not name: return ''
     candidates = _normalize_spell_name_for_lookup(name)
     for book_key, prefix in books:
         index = html_title_index(book_key, prefix)
         for cand in candidates:
-            entry = index.get(cand)
+            entry = ((spell_list and index.get(f'{cand}|{spell_list}'))
+                     or index.get(cand))
             if not entry: continue
             try:
                 if isinstance(entry, tuple):
                     filepath, start, end = entry
                     book_dir = os.path.dirname(filepath)
-                    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+                    src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
                     with open(filepath, 'r', encoding='cp1252') as f:
                         raw = f.read()
                     chunk = raw[start:end]
@@ -2425,7 +2442,7 @@ def lookup_html_description(name, books):
                 else:
                     filepath = entry
                     book_dir = os.path.dirname(filepath)
-                    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+                    src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
                     return clean_html_file(filepath, book_key, src_dir_files)
             except Exception:
                 pass
@@ -2461,7 +2478,12 @@ def _item_magic_lookup_candidates(full_name):
     # ── Swords: "Sword, scimitar +5 Holy Avenger" → "sword +5 holy avenger" ──
     if low.startswith('sword,'):
         rest = _SWORD_SUBTYPE_RE.sub('', full_name).strip()
-        if rest:
+        # A bare "+N" (plain magic sword, no named property) has no DMG page of
+        # its own: "sword +1" only matches the truncated titles of SPECIAL swords
+        # ("Sword +1-- +4 vs. Reptiles", …), several pages claiming the same key,
+        # so the hit would be an arbitrary special sword. Let it fall through to
+        # the generic weapon description instead.
+        if rest and not re.fullmatch(r'[+\-]\d+', rest):
             candidates.append(f'sword {rest}')      # "sword +5 Holy Avenger"
             candidates.append(f'sword, {rest}')     # "sword, Vorpal" style
             # Some DMG anchors use "sword+N, Name" (no space, comma after bonus)
@@ -2483,6 +2505,79 @@ def _item_magic_lookup_candidates(full_name):
     candidates.append(full_name)
 
     return [c.lower().strip() for c in candidates if c and len(c) > 3]
+
+
+_dmg_sword_entries_cache = None
+def _dmg_sword_entries():
+    """[(token_set, entry)] for every DMG special-sword source: the FULL page
+    titles ("Sword +3-- Frost Brand-- +6 vs. Fire-Using/Dwelling Creatures", whose
+    index key is truncated to an ambiguous "sword +3") plus the anchored index
+    keys ("sword +1, luck blade"). entry is a filepath or an anchored slice."""
+    global _dmg_sword_entries_cache
+    if _dmg_sword_entries_cache is not None:
+        return _dmg_sword_entries_cache
+    out = []
+    book_dir = os.path.join(SOURCE_BASE, 'DMG')
+    if os.path.isdir(book_dir):
+        for fn in _listdir(book_dir):
+            if not (fn.upper().startswith('DMG') and fn.upper().endswith('.HTM')):
+                continue
+            fp = os.path.join(book_dir, fn)
+            try:
+                title = extract_title(fp).strip()
+            except Exception:
+                continue
+            if not title.lower().startswith('sword'):
+                continue
+            title = re.sub(r'--\s*Magical Weapons?\b.*$|\(D(?:MG|ungeon Master).*$', '', title, flags=re.I)
+            out.append((frozenset(re.findall(r'[a-z]+|\d+', title.lower())), fp))
+    for k, entry in html_title_index('DMG', 'DMG').items():
+        if k.startswith('sword') and '|' not in k:
+            out.append((frozenset(re.findall(r'[a-z]+|\d+', k)), entry))
+    _dmg_sword_entries_cache = out
+    return out
+
+
+def _dmg_special_sword_description(name):
+    """DMG text for a NAMED special sword ("Sword, long +3 Frost Brand",
+    "Sword, two-handed +2 Dragon Slayer, red") whose exact-name lookup failed.
+    The words after the sword type must all appear in one DMG sword title; a
+    trailing ", <variant>" (dragon colour) is dropped if needed. The match with
+    the fewest extra words wins; a tie between different pages returns ''."""
+    rest = _SWORD_SUBTYPE_RE.sub('', name).strip()
+    if not rest or re.fullmatch(r'[+\-]\d+', rest) or rest == name:
+        return ''
+    tries = [rest]
+    if ',' in rest:
+        tries.append(rest.rsplit(',', 1)[0])
+    page_of = lambda e: e[0] if isinstance(e, tuple) else e
+    for t in tries:
+        want = set(re.findall(r'[a-z]+|\d+', t.lower())) - {'of', 'the', 'vs'}
+        # need a real name word: a bare "+1" would hit an arbitrary special sword
+        if not any(w.isalpha() for w in want):
+            continue
+        best, best_extra, tie = None, None, False
+        for toks, entry in _dmg_sword_entries():
+            if not want <= toks:
+                continue
+            extra = len(toks - want)
+            if best is None or extra < best_extra:
+                best, best_extra, tie = entry, extra, False
+            elif extra == best_extra and page_of(entry) != page_of(best):
+                tie = True
+        if best is not None and not tie:
+            try:
+                if isinstance(best, tuple):
+                    fp, start, end = best
+                    src = {f.upper(): f for f in _listdir(os.path.dirname(fp))}
+                    raw = open(fp, 'r', encoding='cp1252').read()[start:end]
+                    soup = BeautifulSoup(f'<html><body>{raw}</body></html>', 'html.parser')
+                    return _clean_html_body(soup.find('body') or soup, soup, 'DMG', src)
+                src = {f.upper(): f for f in _listdir(os.path.dirname(best))}
+                return clean_html_file(best, 'DMG', src)
+            except Exception:
+                return ''
+    return ''
 
 
 def _item_dmg_magic_description(name):
@@ -2515,11 +2610,11 @@ def _item_dmg_magic_description(name):
         try:
             if isinstance(entry, tuple):
                 fp, start, end = entry
-                src = {f.upper(): f for f in os.listdir(os.path.dirname(fp))}
+                src = {f.upper(): f for f in _listdir(os.path.dirname(fp))}
                 raw = open(fp, 'r', encoding='cp1252').read()[start:end]
                 soup = BeautifulSoup(f'<html><body>{raw}</body></html>', 'html.parser')
                 return _clean_html_body(soup.find('body') or soup, soup, 'DMG', src)
-            src = {f.upper(): f for f in os.listdir(os.path.dirname(entry))}
+            src = {f.upper(): f for f in _listdir(os.path.dirname(entry))}
             return clean_html_file(entry, 'DMG', src)
         except Exception:
             return ''
@@ -4709,7 +4804,7 @@ def _sp_extract_subrace_html(race_name):
 
     book_dir = os.path.dirname(path)
     book_key = os.path.basename(book_dir)
-    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
     return _clean_html_body(new_body, new_soup, book_key, src_dir_files)
 
 
@@ -4737,7 +4832,7 @@ def _race_html_description(race_name):
     book_dir = os.path.dirname(path)
     book_key = os.path.basename(book_dir)
     try:
-        src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+        src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
         return clean_html_file(path, book_key, src_dir_files)
     except Exception:
         return ''
@@ -5356,7 +5451,7 @@ def make_part_item(part, img_path=None, base_weapons=None):
     # spurious armor marker. Recover the weapon traits from the matching base
     # weapon — a name match is authoritative over the bogus armor flag.
     if base_weapons and part.get('damage_type') is None:
-        bw = base_weapons.get(base_name.lower())
+        bw = _base_weapon_for(part['name'], base_weapons)
         if bw:
             part = {**part, 'is_armor': False}
             for k in ('damage_type', 'dmg_normal', 'dmg_large', 'speed',
@@ -5409,6 +5504,9 @@ def make_part_item(part, img_path=None, base_weapons=None):
             description = lookup_html_description(dmg_cand, _ITEM_DMG_BOOKS)
             if description:
                 break
+    # Named special swords whose DMG title is worded differently from PARTS.DAT.
+    if not description and part['name'].lower().startswith('sword,'):
+        description = _dmg_special_sword_description(part['name'])
     # Final fallback for weapons/armor: the C&T Weapon/Armor Description glossaries
     # (CT00375 / CT00378), which cover the exotic & historical gear the PHB/DMG/AEG
     # omit. Matches the weapon/armor type by contiguous phrase (so a magic variant
@@ -5707,6 +5805,13 @@ _SPELL_DESC_HTM_INDEX = {
     455: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
     916: ('MM/MM00043.HTM', 'Create Crypt Thing'),
     917: ('MM/MM00043.HTM', 'Destroy Crypt Thing'),
+    # Wizard Conjure <element> Elemental: SPELLS.DAT splits the wizard spell per
+    # element, but the PHB has a single generic wizard page; a bare-name lookup
+    # would hand these records the same-named PRIEST spell's page.
+    472: 'PHB/PHB00578.HTM',
+    473: 'PHB/PHB00578.HTM',
+    474: 'PHB/PHB00578.HTM',
+    475: 'PHB/PHB00578.HTM',
     # HTM title "Dimension Blade" (missing "al") — bypass name lookup.
     417: 'SM/SM00285.HTM',
     # DAT typo "Enegry Drain" — PHB page title is correct "Energy Drain".
@@ -5761,7 +5866,7 @@ def _spell_description_from_path(rel):
         return ''
     try:
         book_key = rel.split('/')[0]
-        src_dir_files = {f.upper(): f for f in os.listdir(os.path.dirname(path))}
+        src_dir_files = {f.upper(): f for f in _listdir(os.path.dirname(path))}
         if anchor is None:
             return clean_html_file(path, book_key, src_dir_files)
         # Anchor mode: extract the HTML slice starting at anchor_text.
@@ -6763,7 +6868,8 @@ def make_spell_item(spell, desc_override_rel=None):
     if desc_override_rel:
         description = _spell_description_from_path(desc_override_rel)
     if not description:
-        description = lookup_html_description(spell['name'], _SPELL_HTML_BOOKS)
+        description = lookup_html_description(spell['name'], _SPELL_HTML_BOOKS,
+                                              spell_list=spell.get('class_type'))
     cls = spell.get('class_type', 'wizard')
     spell_type = 'Divine' if cls == 'priest' else 'Arcane'
     save_type  = _spell_save_type(spell.get('saving_throw', ''))
@@ -7339,7 +7445,7 @@ def _finalize_with_fvtt_cli():
     os.makedirs(packs_dir, exist_ok=True)
 
     ok = fail = 0
-    for pack_name in sorted(os.listdir(_PACK_SRC_BASE)):
+    for pack_name in sorted(_listdir(_PACK_SRC_BASE)):
         src = os.path.join(_PACK_SRC_BASE, pack_name)
         if not os.path.isdir(src):
             continue
@@ -7362,7 +7468,7 @@ def _finalize_with_fvtt_cli():
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 shell=(sys.platform == 'win32'),
                                 encoding='utf-8', errors='replace')
-        n      = len([f for f in os.listdir(src) if f.endswith('.json')])
+        n      = len([f for f in _listdir(src) if f.endswith('.json')])
         if result.returncode == 0:
             print(f"  ✓ {pack_name} ({n} docs)")
             ok += 1
@@ -8146,8 +8252,8 @@ def _build_sp_psionic_index():
     if not os.path.isdir(book_dir):
         _sp_psionic_cache = index
         return index
-    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
-    for fn in sorted(os.listdir(book_dir)):
+    src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
+    for fn in sorted(_listdir(book_dir)):
         if not (fn.upper().startswith('SP') and fn.upper().endswith('.HTM')):
             continue
         path = os.path.join(book_dir, fn)
@@ -8228,9 +8334,9 @@ def _build_phb_class_desc_index():
     if not os.path.isdir(book_dir):
         _phb_class_desc_cache = index
         return index
-    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
     all_files = sorted([
-        f for f in os.listdir(book_dir)
+        f for f in _listdir(book_dir)
         if f.upper().startswith('PHB') and f.upper().endswith('.HTM')
     ])
     for fn in all_files:
@@ -8773,7 +8879,7 @@ def _druid_granted_abilities():
     path = os.path.join(book_dir, 'PHB00088.HTM')
     if not os.path.exists(path):
         return []
-    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_files = {f.upper(): f for f in _listdir(book_dir)}
     html = clean_html_file(path, 'PHB', src_files)
     soup = BeautifulSoup(html, 'html.parser')
 
@@ -8918,7 +9024,7 @@ def _hlc_class_abilities(cls_name):
     path = os.path.join(book_dir, fn + '.HTM')
     if not os.path.exists(path):
         return []
-    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_files = {f.upper(): f for f in _listdir(book_dir)}
     html = clean_html_file(path, 'HLC', src_files)
     out = []
     for lead, block_html in _parse_strong_ability_blocks(html):
@@ -8986,7 +9092,7 @@ def _thief_backstab_block(html):
     path = os.path.join(book_dir, 'PHB00100.HTM')
     if not os.path.exists(path):
         return None
-    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_files = {f.upper(): f for f in _listdir(book_dir)}
     expl_html = clean_html_file(path, 'PHB', src_files)
     soup2 = BeautifulSoup(expl_html, 'html.parser')
     pat = re.compile(r'backstab', re.I)
@@ -9010,7 +9116,7 @@ def _load_skill_link_map():
     result = {}
     if not os.path.isdir(skills_src):
         return result
-    for fn in os.listdir(skills_src):
+    for fn in _listdir(skills_src):
         if not fn.endswith('.json'):
             continue
         try:
@@ -9030,7 +9136,7 @@ def _load_weapon_specialization_data():
     """Read PHB00125–127 and return cleaned HTML descriptions plus bonus
     values and slot costs parsed from the source files at runtime."""
     phb_dir       = os.path.join(SOURCE_BASE, 'PHB')
-    src_dir_files = {f.upper(): f for f in os.listdir(phb_dir)}
+    src_dir_files = {f.upper(): f for f in _listdir(phb_dir)}
 
     def _page(fname):
         path = os.path.join(phb_dir, fname)
@@ -9600,6 +9706,22 @@ def migrate_items():
         print("  No parts parsed."); return 0
     # Base-weapon index: stripped name → the base record, for recovering the
     # damage/speed of magic variants (Sword +1) whose own damage zone is unread.
+    # Base weapons whose own record has no readable damage zone: recover their
+    # damage type / dice / size from the PHB and C&T weapon tables (runtime).
+    recovered = 0
+    for part in parts:
+        if (part.get('damage_type') is None and part.get('handedness')
+                and not re.search(r'[+\-]\d', part['name'])
+                and not part['name'].lower().startswith('potion')):
+            traits = _weapon_traits_from_tables(part['name'], part.get('handedness'))
+            if traits:
+                for k, v in traits.items():
+                    if v is not None and part.get(k) is None:
+                        part[k] = v
+                part['is_armor'] = False
+                recovered += 1
+    if recovered:
+        print(f"  {recovered} base weapons completed from the PHB / C&T weapon tables")
     base_weapons = {}
     for part in parts:
         if part.get('damage_type') is not None:
@@ -9752,7 +9874,7 @@ def migrate_psionics():
     db = _open_pack(OUTPUT_PACKS['powers'])
 
     sp_book_dir = os.path.join(SOURCE_BASE, 'SP')
-    sp_dir_files = ({f.upper(): f for f in os.listdir(sp_book_dir)}
+    sp_dir_files = ({f.upper(): f for f in _listdir(sp_book_dir)}
                    if os.path.isdir(sp_book_dir) else {})
 
     # One folder per discipline, in canonical order
@@ -9969,7 +10091,7 @@ def _build_mm_embed_index():
     if not os.path.isdir(journal_src):
         _mm_embed_index_cache = index
         return index
-    for fn in os.listdir(journal_src):
+    for fn in _listdir(journal_src):
         if not fn.endswith('.json'):
             continue
         try:
@@ -10075,14 +10197,20 @@ def _load_phb_weapons_table():
     if not os.path.exists(path):
         _phb_weapons_cache = out; return out
     soup = BeautifulSoup(open(path, encoding='cp1252').read(), 'html.parser')
+    parent = ''
     for tr in soup.find_all('tr'):
         cells = [td.get_text(strip=True) for td in tr.find_all('td')]
         if len(cells) < 7: continue
         name = cells[0]
         if not name or name == 'Item': continue
         # Category-header rows like "Bow", "Sword", "Polearm" have stat cells = "--"
-        if all(c.strip() in ('', '--') for c in cells[1:]): continue
+        if all(c.strip() in ('', '--') for c in cells[1:]):
+            parent = name
+            continue
         out.append({
+            # header the row sits under ("Bastard sword" for "One-handed");
+            # only used to disambiguate grip sub-rows, never as the row name
+            'parent': parent,
             'name':   re.sub(r'\s*\d+$', '', name).strip(),
             'cost':   cells[1], 'weight': cells[2],
             'size':   cells[3], 'type':   cells[4],
@@ -10182,14 +10310,18 @@ def _load_ct_master_weapons():
             if (len(cells) >= 3 and _CT_DICE_RE.match(cells[-3])
                     and _CT_DICE_RE.match(cells[-2])):
                 dice = (cells[-3], cells[-2])
+            # Size / Type columns (2nd / 3rd after the name; header row
+            # "Weapon, Wt., Size, Type, …"). Kept only when they look valid.
+            size = cells[2] if len(cells) > 3 and cells[2] in ('T', 'S', 'M', 'L', 'H', 'G') else None
+            dtype = cells[3] if len(cells) > 3 and re.fullmatch(r'[PSB](/[PSB])*', cells[3] or '') else None
             nt = _ct_name_tokens(name)
             if indent == 0:
                 category = nt
                 if dice:
-                    out.append((set(nt), dice[0], dice[1]))
+                    out.append((set(nt), dice[0], dice[1], dtype, size))
             elif dice:
                 base = set(category or []) | set(nt)
-                out.append((base, dice[0], dice[1]))
+                out.append((base, dice[0], dice[1], dtype, size))
     _ct_master_weapons_cache = out
     return out
 
@@ -10204,11 +10336,85 @@ def _ct_weapon_dice(name):
     clean = re.sub(r'\s*[+-]\d+.*$', '', name or '').replace('volge', 'voulge')
     P = set(_ct_name_tokens(clean))
     best, best_n = None, -1
-    for toks, n, l in _load_ct_master_weapons():
+    for toks, n, l, *_ in _load_ct_master_weapons():
         if all(any(t == p or (len(p) >= 4 and t.startswith(p)) for p in P)
                for t in toks) and len(toks) > best_n:
             best, best_n = (n, l), len(toks)
     return best or (None, None)
+
+
+def _tok_cover(a, b):
+    """True if token `a` is matched by token `b`: equal, or one is a ≥3-char
+    prefix of the other (absorbs table abbreviations like 'Two-hand.' and CT's
+    glued footnote letters)."""
+    return a == b or (len(a) >= 3 and b.startswith(a)) or (len(b) >= 3 and a.startswith(b))
+
+
+def _weapon_traits_from_tables(name, handedness=None):
+    """Recover {damage_type, dmg_normal, dmg_large, size_category} for a base
+    weapon whose PARTS.DAT record has no readable damage zone (two-handed sword,
+    footman's mace, scimitar, …), from PHB Table 44 then the C&T Master Weapons
+    Table — both read from the user's CD-ROM at runtime. A table row matches only
+    when EVERY name token and EVERY row token cover each other (order-free, so
+    'Sword, two-handed' ↔ 'Two-hand. sword', 'Mace, footman's' ↔ 'Footman's
+    mace'); a match must be unique. Returns None when nothing matches."""
+    key = _phb_weapon_dice_key(name)
+    ntoks = [t for t in key.split() if len(t) > 1]
+    if not ntoks:
+        return None
+    def both_ways(rtoks):
+        return (all(any(_tok_cover(r, n) for n in ntoks) for r in rtoks) and
+                all(any(_tok_cover(n, r) for r in rtoks) for n in ntoks))
+    def row_toks(r):
+        toks = [t for t in _phb_weapon_dice_key(r['name']).split() if len(t) > 1]
+        if 'handed' in toks and r.get('parent'):   # "One-handed" under "Bastard sword"
+            toks += [t for t in _phb_weapon_dice_key(r['parent']).split() if len(t) > 1]
+        return toks
+    hits = [r for r in _load_phb_weapons_table()
+            if both_ways(row_toks(r))
+            and re.fullmatch(r'[PSB](/[PSB])*', r.get('type') or '')]
+    if len(hits) == 1:
+        r = hits[0]
+        return {'damage_type': r['type'], 'dmg_normal': r['dmg_sm'],
+                'dmg_large': r['dmg_l'], 'size_category': r.get('size') or None}
+    clean = re.sub(r'\s*[+-]\d+.*$', '', name or '').replace('volge', 'voulge')
+    ctoks = [t for t in _ct_name_tokens(clean) if t != 'polearm']
+    ntoks = ctoks
+    hits = [(toks, n, l, dt, sz) for toks, n, l, dt, sz in _load_ct_master_weapons()
+            if dt and both_ways([t for t in toks if t != 'polearm'])]
+    if len(hits) == 1:
+        _, n, l, dt, sz = hits[0]
+        return {'damage_type': dt, 'dmg_normal': n, 'dmg_large': l, 'size_category': sz}
+    # Tables split some weapons by grip ("Bastard sword — One-handed /
+    # Two-handed"); retry with the grip taken from the DAT handedness byte.
+    if handedness in (1, 2) and 'handed' not in key:
+        return _weapon_traits_from_tables(
+            f"{name} {'one' if handedness == 1 else 'two'}-handed")
+    return None
+
+
+def _base_weapon_for(name, base_weapons):
+    """Base weapon record for a magic variant: strip the ±N suffix, then — for
+    'Category, variant <special…>' names ('Sword, long Vorpal', 'Sword,
+    two-handed of Dancing') — try ever-shorter word prefixes of the part after
+    the comma, keeping at least one word so 'Chain, heavy' never collapses to a
+    bare 'Chain'. Longest (most specific) match wins."""
+    bn = re.sub(r'\s*[+\-]\d+.*$', '', name).strip()
+    hit = base_weapons.get(bn.lower())
+    if hit or ',' not in bn:
+        return hit
+    head, tail = bn.split(',', 1)
+    words = tail.split()
+    for k in range(len(words) - 1, 0, -1):
+        # Only drop magic qualifiers, which PARTS.DAT capitalises ("Vorpal",
+        # "of Dancing", "of the Planes", "Cursed Berserking"); lower-case words
+        # are a different weapon ("blunderbuss pistol", "stone (two-handed)").
+        if not all(w[:1].isupper() or w in ('of', 'the') for w in words[k:]):
+            continue
+        hit = base_weapons.get(f"{head.strip()}, {' '.join(words[:k])}".lower())
+        if hit:
+            return hit
+    return None
 
 
 # ── C&T weapon / armor description glossaries (CT00375 / CT00378) ─────────────
@@ -10312,7 +10518,7 @@ def _load_dmg_potion_index():
     out = {}
     book_dir = os.path.join(SOURCE_BASE, 'DMG')
     if os.path.isdir(book_dir):
-        for fn in os.listdir(book_dir):
+        for fn in _listdir(book_dir):
             if not (fn.upper().startswith('DMG') and fn.upper().endswith('.HTM')):
                 continue
             fp = os.path.join(book_dir, fn)
@@ -10343,7 +10549,7 @@ def _potion_description_and_heal(name):
         fp = best
     if not fp:
         return '', ''
-    src = {f.upper(): f for f in os.listdir(os.path.dirname(fp))}
+    src = {f.upper(): f for f in _listdir(os.path.dirname(fp))}
     try:
         html = clean_html_file(fp, 'DMG', src)
     except Exception:
@@ -10618,9 +10824,9 @@ def _load_sp_psionicist_nwps():
     book_dir = os.path.join(SOURCE_BASE, 'SP')
     if not os.path.isdir(book_dir):
         return []
-    src_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_files = {f.upper(): f for f in _listdir(book_dir)}
     out = []
-    for fn in sorted(os.listdir(book_dir)):
+    for fn in sorted(_listdir(book_dir)):
         if not (fn.upper().startswith('SP') and fn.upper().endswith('.HTM')):
             continue
         path = os.path.join(book_dir, fn)
@@ -10652,7 +10858,7 @@ def _extract_proficiency_description(book_key, anchor_file):
         path = os.path.join(book_dir, anchor_file)
     if not os.path.exists(path): return ''
     try:
-        src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+        src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
         return clean_html_file(path, book_key, src_dir_files)
     except Exception:
         return ''
@@ -11822,7 +12028,7 @@ def migrate_kits():
         src_dir = os.path.join(_PACK_SRC_BASE, os.path.basename(OUTPUT_PACKS[packkey]))
         if not os.path.isdir(src_dir):
             continue
-        for fname in os.listdir(src_dir):
+        for fname in _listdir(src_dir):
             if not fname.endswith('.json'):
                 continue
             with open(os.path.join(src_dir, fname), encoding='utf-8') as fh:
@@ -11837,7 +12043,7 @@ def migrate_kits():
     def _srcfiles(book):
         if book not in srcfiles:
             d = os.path.join(SOURCE_BASE, book)
-            srcfiles[book] = ({f.upper(): f for f in os.listdir(d)}
+            srcfiles[book] = ({f.upper(): f for f in _listdir(d)}
                               if os.path.isdir(d) else {})
         return srcfiles[book]
 
@@ -11925,7 +12131,7 @@ def migrate_treasure():
     item_uuids = {}
     items_src = os.path.join(_PACK_SRC_BASE, os.path.basename(OUTPUT_PACKS['items']))
     if os.path.isdir(items_src):
-        for fname in os.listdir(items_src):
+        for fname in _listdir(items_src):
             if not fname.endswith('.json'):
                 continue
             with open(os.path.join(items_src, fname), encoding='utf-8') as fh:
@@ -12017,7 +12223,7 @@ def migrate_book(book_config, folder_id, db, stats, book_sort=0):
         return
 
     # Pre-build case-insensitive map of source images
-    src_dir_files = {f.upper(): f for f in os.listdir(book_dir)}
+    src_dir_files = {f.upper(): f for f in _listdir(book_dir)}
 
     journal_id = make_id()
     page_ids   = []
@@ -12048,7 +12254,7 @@ def migrate_book(book_config, folder_id, db, stats, book_sort=0):
 
     elif mode == 'pages':
         all_files = sorted([
-            f for f in os.listdir(book_dir)
+            f for f in _listdir(book_dir)
             if f.upper().startswith(book_prefix) and f.upper().endswith('.HTM')
                and f.upper() != f'{book_prefix}00000.HTM'
         ])
@@ -12098,6 +12304,15 @@ def migrate_book(book_config, folder_id, db, stats, book_sort=0):
 # copied), and the *_BASE constants are pointed at the mirror. On Windows and
 # other case-insensitive filesystems, or on a tree that is already upper case,
 # nothing happens.
+
+def _listdir(path):
+    """os.listdir in a platform-independent order. NTFS returns names sorted
+    case-insensitively while ext4 returns them in hash order, and several loaders
+    keep the FIRST match among candidates — so an unsorted listdir made Linux and
+    Windows builds differ. Sorting the way NTFS does (upper-cased name) keeps the
+    Windows output unchanged and makes every platform produce it."""
+    return sorted(os.listdir(path), key=lambda n: (n.upper(), n))
+
 
 def _ci_resolve(path):
     """Return the existing path that matches `path` case-insensitively, walking
