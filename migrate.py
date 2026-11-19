@@ -9942,6 +9942,234 @@ def migrate_classes():
     return count
 
 
+# ─── Magic-item spell powers (hand-curated reference table) ───────────────────
+# Which magic items can cast which spells, decided by reading every candidate
+# DMG description once (2026-11-19) — the CD-ROM never changes, so the decision
+# is captured here instead of being re-guessed at run time. ONLY references are
+# stored (copyright rule): PARTS.DAT record index → SPELLS.DAT record index, and
+# for each power a "kind" plus, where the rules give a number (charge cost, uses
+# per day/week, gem count…), a regex ANCHOR whose first group captures that
+# number in the item's own description at run time. No rules value is typed in.
+#
+# kinds:
+#   'free'   no resource (at will, or "does not drain charges")
+#   'charge' resource 'powered' (item charges); cost = anchor number (None → 1)
+#   'daily'  resource 'charged', resets daily;  max uses = anchor number
+#   'weekly' resource 'charged', resets weekly; max uses = anchor number
+#   'uses'   resource 'charged', never resets;  max uses = anchor number
+#   'item'   resource 'item' (consumes the item itself, e.g. a candle)
+#   'potion' no resource (the potion's own Quaff action consumes it)
+# An optional 4th field prefixes the action group name (element of a ring).
+# Group content = a copy of the generated spell's own action groups.
+_P = None   # anchor placeholder: no number in the text for this power
+_ITEM_SPELL_POWERS = {
+    338: [  # Staff of the Magi
+        (11, 'free', _P), (439, 'free', _P), (19, 'free', _P), (23, 'free', _P),
+        (441, 'free', _P), (433, 'free', _P),
+        *[(s, 'charge', r'following powers drain (\w+) charge')
+          for s in (60, 92, 62, 104, 72, 138, 82, 160, 89, 188)],
+        *[(s, 'charge', r'these powers drain (\w+) charges')
+          for s in (472, 473, 474, 475, 503, 195)],
+    ],
+    304: [  # Staff of Power
+        *[(s, 'charge', r'powers below cost (\w+) charge')
+          for s in (46, 24, 104, 73, 65, 171, 92)],
+        *[(s, 'charge', r'following powers drain (\w+) charges each')
+          for s in (31, 216)],
+    ],
+    306: [  # Staff of the Woodlands
+        *[(s, 'charge', r'each expending (\w+) charge per use') for s in (527, 485, 491)],
+        *[(s, 'daily', r'employed (\w+) per day') for s in (600, 601, 608)],
+    ],
+    333: [(115, 'charge', r'draws (\w+) charge from the staff'),       # Staff of Command
+          (7, 'charge', r'draws (\w+) charge from the staff')],
+    337: [(591, 'charge', r'each function drains (\w+) charge'),       # Staff of Curing
+          (590, 'charge', r'each function drains (\w+) charge')],
+    2346: [(4, 'charge', r'burning hands:[^•]*?expends (\w+) charge'),  # Wand of Fire
+           (72, 'charge', r'pyrotechnics:[^•]*?expends (\w+) charge'),
+           (92, 'charge', r'fireball:[^•]*?expends (\w+) charge'),
+           (160, 'charge', r'wall of fire:[^•]*?expends (\w+) charge')],
+    2348: [(138, 'charge', r'ice storm:[^•]*?requires (\w+) charge'),   # Wand of Frost
+           (161, 'charge', r'wall of ice:[^•]*?uses (\w+) charge'),
+           (171, 'charge', r'cone of cold:[^•]*?cost is (\w+) charges')],
+    2349: [(10, 'charge', r'dancing lights:[^•]*?cost of (\w+) charge'),  # Wand of Illumination
+           (23, 'charge', r'• light:[^•]*?expenditure of (\w+) charge'),
+           (46, 'charge', r'continual light:[^•]*?require (\w+) charges')],
+    2351: [(104, 'charge', r'lightning bolt:[^•]*?uses (\w+) charges')],   # Wand of Lightning
+    2353: [(24, 'charge', r'each missile costs (\w+) charge')],            # Wand of Magic Missiles
+    2345: [(879, 'charge', r'each use costs (\w+) charge')],               # Wand of Fear
+    2357: [(150, 'charge', r'each draws (\w+) charge'),                    # Wand of Polymorphing
+           (151, 'charge', r'each draws (\w+) charge')],
+    2359: [(439, 'charge', r'expends (\w+) charge'),                       # Wand of Size Alteration
+           (432, 'charge', r'expends (\w+) charge')],
+    2350: [(29, 'charge', r'cost (\w+) charge to effect'),                 # Wand of Illusion
+           (3, 'charge', r'cost (\w+) charge to effect')],
+    2342: [(38, 'charge', r'require expenditure of (\w+) charge each'),    # Wand of Conjuration
+           (106, 'charge', r'require expenditure of (\w+) charge each')],
+    2343: [(125, 'charge', r'dig (\S+) charge/use'),                       # Wand of Earth and Stone
+           (188, 'charge', r'passwall (\w+) charge/use'),
+           (226, 'charge', r'move earth (\w+) charges/use')],
+    2448: [(125, 'charge', r'dig (\S+) charge/use'),                       # … with transmutation
+           (188, 'charge', r'passwall (\w+) charge/use'),
+           (226, 'charge', r'move earth (\w+) charges/use'),
+           (448, 'charge', r'transmute mud to rock (\w+) charge/use'),
+           (197, 'charge', r'transmute rock to mud (\w+) charge/use')],
+    2352: [(11, 'charge', r'(\w+) charge is expended per turn')],          # Wand of Magic Detection
+    328: [(132, 'charge', r'each function draws off (\w+) charge')],       # Rod of Lordly Might
+    327: [(s, 'charge', r'necessary to expend (\w+) charge to activate')   # Rod of Passage
+          for s in (288, 126, 188, 254, 263)],
+    326: [(598, 'daily', r'can be used (\w+) per day')],                   # Rod of Resurrection
+    332: [  # Rod of Alertness
+        *[(s, 'free', _P) for s in (482, 875, 539, 530, 536, 51)],
+        *[(s, 'charge', r'protective functions require (\w+) charge') for s in (639, 519)],
+        (524, 'charge', r'animate object_? power requires? (\w+)'),
+    ],
+    2247: [(85, 'free', _P)],                                               # Ring of Blinking
+    2253: [(14, 'free', _P)],                                               # Ring of Feather Falling
+    2257: [(60, 'free', _P)],                                               # Ring of Invisibility
+    2258: [(22, 'daily', r'perform only (\w+) times per day')],             # Ring of Jumping
+    2256: [(115, 'daily', r'applicable but (\w+) per day'),                 # Ring of Human Influence
+           (7, 'daily', r'applicable but (\w+) per day')],
+    **{i: [(195, 'free', _P)] for i in (2274, 2545, 2546, 2547, 2548, 2549)},  # Rings of Telekinesis
+    2269: [(10, 'free', _P),                                                # Ring of Shooting Stars
+           (23, 'daily', r'light,[^•]*?\((\w+) per night\)'),
+           (645, 'daily', r'faerie fire\W*\((\w+) per day\)')],
+    2252: [  # Ring of Elemental Command (all four elements on one record)
+        (95, 'free', _P, 'Air: '), (94, 'free', _P, 'Air: '),
+        (198, 'daily', r'wall of force\W*\((\w+) per day\)', 'Air: '),
+        (649, 'weekly', r'control winds\W*\((\w+) per week\)', 'Air: '),
+        (60, 'free', _P, 'Air: '),
+        (569, 'daily', r'stone tell\W*\((\w+) per day\)', 'Earth: '),
+        (188, 'daily', r'passwall\W*\((\w+) per day\)', 'Earth: '),
+        (200, 'daily', r'wall of stone\W*\((\w+) per day\)', 'Earth: '),
+        (235, 'weekly', r'stone to flesh\W*\((\w+) per week\)', 'Earth: '),
+        (226, 'weekly', r'move earth\W*\((\w+) per week\)', 'Earth: '),
+        (14, 'free', _P, 'Earth: '),
+        (4, 'free', _P, 'Fire: '),
+        (72, 'daily', r'pyrotechnics\W*\((\w+) per day\)', 'Fire: '),
+        (160, 'daily', r'wall of fire\W*\((\w+) per day\)', 'Fire: '),
+        (520, 'weekly', r'flame strike\W*\((\w+) per week\)', 'Fire: '),
+        (548, 'daily', r'create water\W*\((\w+) per day\)', 'Water: '),
+        (118, 'free', _P, 'Water: '),
+        (161, 'daily', r'wall of ice\W*\((\w+) per day\)', 'Water: '),
+        (164, 'free', _P, 'Water: '),
+        (220, 'weekly', r'lower water\W*\((\w+) per week\)', 'Water: '),
+        (228, 'weekly', r'part water\W*\((\w+) per week\)', 'Water: '),
+    ],
+    2370: [(256, 'uses', r'set with (\d+) diamonds'),                        # Helm of Brilliance
+           (565, 'uses', r'(\d+) rubies'),
+           (92, 'uses', r'(\d+) fire opals'),
+           (639, 'uses', r'and (\d+) opals')],
+    2063: [(82, 'daily', r'(once) per day the wearer')],                   # Cloak of Arachnida
+    2179: [(115, 'free', _P)],                                              # Harp of Charming
+    2184: [(54, 'free', _P)],                                               # Horn of Fog
+    2320: [(95, 'daily', r'can be used (\w+) per day')],                   # Wind Fan
+    **{i: [(637, 'item', _P)] for i in range(2439, 2448)},                 # Candles of Invocation
+    2279: [(305, 'charge', _P)],                                            # Ring of Wishes, multiple
+    2280: [(305, 'uses', r'contains (\w+) _?wish')],                        # Ring of Wishes, three
+    2208: [(94, 'potion', _P)], 2198: [(87, 'potion', _P)],                 # Potions: Flying, Clairvoyance
+    2205: [(52, 'potion', _P)], 2239: [(118, 'potion', _P)],                # ESP, Water Breathing
+    2237: [(39, 'uses', r'up to (\w+) times')],                             # Ventriloquism
+    **{i: [(121, 'potion', _P)] for i in range(2385, 2403)},               # Dragon / Giant Control
+    **{i: [(7, 'potion', _P)] for i in range(2409, 2427)},                 # Undead / Human Control
+}
+
+# PARTS.DAT records with no description of their own that share another
+# record's DMG text (the 50% "with transmutation" variant of a wand).
+_ITEM_DESCRIPTION_FROM = {2448: 2343}   # Wand of Earth and Stone (Transmutation)
+
+_NUMBER_WORDS = {'once': 1, 'twice': 2, 'thrice': 3, 'one': 1, 'two': 2,
+                 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7,
+                 'eight': 8, 'nine': 9, 'ten': 10, '½': 0.5, 'half': 0.5}
+_SPELL_ITEMS_BY_INDEX = {}   # SPELLS.DAT index → generated spell item (filled by migrate_spells)
+
+
+def _anchor_number(text, anchor):
+    """Number captured by `anchor` in `text` (words, digits or ½), or None."""
+    if not anchor:
+        return None
+    m = re.search(anchor, text, re.I)
+    if not m:
+        return None
+    tok = m.group(1).strip().lower()
+    if tok in _NUMBER_WORDS:
+        return _NUMBER_WORDS[tok]
+    try:
+        return int(tok)
+    except ValueError:
+        return None
+
+
+def _renew_ids(obj):
+    """Give every 'id' / '_id' inside a copied structure a fresh id."""
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            if k in ('id', '_id') and isinstance(v, str) and len(v) == 16:
+                obj[k] = make_id()
+            else:
+                _renew_ids(v)
+    elif isinstance(obj, list):
+        for x in obj:
+            _renew_ids(x)
+
+
+def _add_item_spell_powers(item, part_index):
+    """Append to a magic item one action group per spell power listed for its
+    PARTS.DAT record in _ITEM_SPELL_POWERS: a copy of the spell's own action
+    groups, renamed, with the item's resource (charges, uses per day…) set on
+    the group's first action. Returns the number of powers added."""
+    powers = _ITEM_SPELL_POWERS.get(part_index)
+    if not powers:
+        return 0
+    text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', item['system'].get('description', '')))
+    # The generic "Activate" group (issue #14) is only a bare 'use' action; the
+    # curated spell powers replace it. One that carries the item's own damage
+    # roll (wand of fire, magic missiles) is kept.
+    item['system']['actionGroups'] = [
+        g for g in item['system'].get('actionGroups', [])
+        if not (g.get('name') == 'Activate'
+                and all(a.get('type') == 'use' for a in g.get('actions', [])))]
+    added = 0
+    for entry in powers:
+        spell_idx, kind, anchor = entry[:3]
+        label = entry[3] if len(entry) > 3 else ''
+        spell = _SPELL_ITEMS_BY_INDEX.get(spell_idx)
+        if not spell or not spell['system'].get('actionGroups'):
+            print(f"  WARNING: item power — spell record {spell_idx} unavailable for {item['name']}")
+            continue
+        n = _anchor_number(text, anchor)
+        if anchor and n is None:
+            print(f"  WARNING: item power — anchor not found in {item['name']}: {anchor}")
+        groups = json.loads(json.dumps(spell['system']['actionGroups']))
+        _renew_ids(groups)
+        for gi, g in enumerate(groups):
+            base = spell['name'] if gi == 0 else g.get('name') or spell['name']
+            g['name'] = f"{label}{base}"
+            acts = g.get('actions') or []
+            if gi == 0 and acts:
+                res = acts[0].setdefault('resource', {})
+                res.setdefault('count', {})
+                res.update({'itemId': '', 'trackTime': 0, 'reusetime': ''})
+                res['count'].update({'min': 0, 'value': 0})
+                if kind == 'charge':
+                    cost = 1 if n is None else n
+                    res['type'] = 'powered' if cost else 'none'
+                    res['count'].update({'cost': cost, 'max': 1})
+                elif kind in ('daily', 'weekly', 'uses'):
+                    res['type'] = 'charged'
+                    res['reusetime'] = {'daily': 'daily', 'weekly': 'weekly'}.get(kind, '')
+                    res['count'].update({'cost': 1, 'max': n or 1})
+                elif kind == 'item':
+                    res['type'] = 'item'
+                    res['count'].update({'cost': 1, 'max': 1})
+                else:   # 'free' / 'potion'
+                    res['type'] = 'none'
+                    res['count'].update({'cost': 1, 'max': 1})
+        item['system'].setdefault('actionGroups', []).extend(groups)
+        added += 1
+    return added
+
+
 def migrate_items():
     """Phase 3: write the items pack from PARTS.DAT — weapon/armor/potion/item,
     foldered by type. Pre-builds a base-weapon name index so magic variants
@@ -9986,12 +10214,19 @@ def migrate_items():
     count = 0
     effects_written = 0
     skipped_nonitem = 0
-    for part in parts:
+    powers_added = 0
+    desc_by_index = {}
+    for part_index, part in enumerate(parts):
         if _is_non_item_part(part['name']):   # S&P build data, not equipment
             skipped_nonitem += 1
             continue
         img = extract_equip_icon(part.get('icon_id'), OUTPUT_IMG_ITEMS)
         item, item_effects = make_part_item(part, img, base_weapons=base_weapons)
+        desc_by_index[part_index] = item['system'].get('description', '')
+        src = _ITEM_DESCRIPTION_FROM.get(part_index)
+        if src is not None and not desc_by_index[part_index].strip():
+            item['system']['description'] = desc_by_index.get(src, '')
+        powers_added += _add_item_spell_powers(item, part_index)
         bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
         item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
@@ -10002,6 +10237,8 @@ def migrate_items():
         count += 1
         if count % 1000 == 0:
             print(f"    {count} items...")
+    if powers_added:
+        print(f"  {powers_added} spell powers added to magic items")
     for f in folders.values():
         db.put(f'!folders!{f["_id"]}'.encode(), json.dumps(f).encode())
     db.close()
@@ -10050,6 +10287,7 @@ def migrate_spells():
     items_by_name = {}      # name_lower → (spell_dict, item_dict, folder_key)
     for idx, spell in enumerate(spells):
         item = make_spell_item(spell, desc_override_rel=_SPELL_DESC_HTM_INDEX.get(idx))
+        _SPELL_ITEMS_BY_INDEX[idx] = item
         # Drop spells whose description came up empty after every
         # name-normalization attempt — they're SPELLS.DAT records whose
         # source page isn't shipped on this CD-ROM (supplements, Spelljammer,
