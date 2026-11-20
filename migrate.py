@@ -12076,25 +12076,100 @@ def _nwp_ability_slug(ability_text):
 
 
 def make_nwp_skill_item(name, source_label, slots_or_cp, ability_label,
-                        modifier, description, icon, extra_meta=''):
+                        modifier, description, icon, extra_meta='',
+                        initial_rating=None):
     """Build a Foundry skill item representing one nonweapon proficiency.
-    Roll: 1d20 vs ability score + modifier (decending — lower roll succeeds).
-    target is an @-formula so it resolves on the actor."""
+    Roll: 1d20, lower succeeds ("decending").
+
+    PHB rule: roll under the ability score + the check modifier. When a skill
+    has an ability, ARS rolls under the raw score and ignores `target`, so the
+    check modifier goes in `features.modifiers.ability` (ARS subtracts the
+    modifiers from the roll: -2 there makes the check 2 harder) — issue #20.
+
+    S&P rule (`initial_rating` given): roll under the initial rating of Table 45
+    + the Table 44 modifier of the better of the listed abilities. That is a
+    formula, so the skill has no ARS ability and `target` carries it."""
     ab = _nwp_ability_slug(ability_label)
-    if ab:
-        target_str = f"@abilities.{ab}.value{modifier if modifier and modifier[0] in '+-' else ''}"
-        formula    = "1d20"
-        kind       = "decending"
+    formula, kind = "1d20", "decending"
+    mod = 0
+    if initial_rating is not None:
+        # an S&P rating of NA (parsed as 0, e.g. blind-fighting) means no check
+        target_str = _sp_proficiency_target(initial_rating, ability_label) if initial_rating else "0"
+        ab = ''
+    elif ab:
+        target_str = f"@abilities.{ab}.value"
+        m = re.match(r'\s*([+\-\u2013\u2212])\s*(\d+)', modifier or '')
+        if m:
+            mod = int(m.group(2)) * (1 if m.group(1) == '+' else -1)
     else:
         target_str = "0"
-        formula    = "1d20"
-        kind       = "decending"
     desc = f"<p><em>{source_label}{extra_meta}</em></p>" + (description or '')
     sk = make_skill_item(name, icon, formula, target_str,
                          type_=kind, groups='', description=desc)
     sk['system']['features']['cost'] = slots_or_cp
     sk['system']['features']['ability'] = ab if ab else 'none'
+    sk['system']['features']['modifiers']['ability'] = mod
     return sk
+
+
+# ── S&P proficiency scores (Table 44 + Table 45, issue #20) ─────────────────
+# S&P: "Table 45 lists, for each nonweapon proficiency, the starting rating …
+# This base chance of success can be modified by a high or low score in a
+# relevant ability … In cases where two abilities are listed, the player can
+# choose which ability modifies the proficiency. The modifiers are listed on
+# Table 44." Table 44 is read from the CD at build time and turned into an ARS
+# roll formula: a sum of unit steps min(1, max(0, score - threshold + 1)), one
+# per row boundary, so the formula reproduces the table without any value
+# typed here.
+_sp_ability_mod_rows_cache = None
+
+def _sp_ability_mod_rows():
+    """[(lowest score of the row, modifier)] from S&P Table 44, ascending."""
+    global _sp_ability_mod_rows_cache
+    if _sp_ability_mod_rows_cache is not None:
+        return _sp_ability_mod_rows_cache
+    rows = []
+    path = os.path.join(SOURCE_BASE, 'SP', 'SP00141.HTM')
+    if os.path.exists(path):
+        t = open(path, encoding='cp1252', errors='replace').read()
+        t = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', t)).replace('\u2013', '-').replace('\u2212', '-')
+        t = t[t.find('Modifier'):] if 'Modifier' in t else ''
+        for m in re.finditer(r'\b(\d+)(?:-\d+|\+)? ([+-]?\d+)\b', t):
+            rows.append((int(m.group(1)), int(m.group(2))))
+    rows.sort()
+    _sp_ability_mod_rows_cache = rows
+    return rows
+
+def _sp_proficiency_target(initial_rating, ability_label):
+    """ARS target formula: initial rating + Table 44 modifier of the best ability."""
+    slugs = []
+    for part in re.split(r',', ability_label or ''):
+        sl = _nwp_ability_slug(part.strip())
+        if sl and sl not in slugs:
+            slugs.append(sl)
+    rows = _sp_ability_mod_rows()
+    if not slugs or not rows:
+        return str(initial_rating)
+    refs = [f'@abilities.{sl}.value' for sl in slugs]
+    score = refs[0] if len(refs) == 1 else f"max({', '.join(refs)})"
+    terms = [str(initial_rating)]
+    if rows[0][1]:
+        terms.append(f'({rows[0][1]})')
+    # One unit step per row boundary; consecutive boundaries with the same step
+    # merge into a single clamp: step*min(count, max(0, score - (first - 1))).
+    runs = []
+    for (lo, mod), (_, prev) in zip(rows[1:], rows[:-1]):
+        step = mod - prev
+        if not step:
+            continue
+        if runs and runs[-1][0] == step and runs[-1][1] + runs[-1][2] == lo:
+            runs[-1][2] += 1
+        else:
+            runs.append([step, lo, 1])
+    for step, first, count in runs:
+        clamp = f'min({count}, max(0, {score} - {first - 1}))'
+        terms.append(clamp if step == 1 else f'({step})*{clamp}')
+    return ' + '.join(terms)
 
 
 def make_rogue_skill_item(name, base_pct, description, icon):
@@ -12493,7 +12568,8 @@ def migrate_skills():
                  f" · Ability: {rec['ability']} · Groups: {groups}")
         item = make_nwp_skill_item(rec['name'], 'S&P Nonweapon Proficiency',
                                    rec['cp_cost'], rec['ability'],
-                                   '', desc, icon, extra_meta=extra)
+                                   '', desc, icon, extra_meta=extra,
+                                   initial_rating=rec['initial'])
         for pri in ('General','Warrior','Priest','Wizard','Rogue','Psionicist'):
             if pri in rec['groups']:
                 item['folder'] = folders[('sp', pri)]['_id']; break
