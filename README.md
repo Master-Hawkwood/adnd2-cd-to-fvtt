@@ -4,6 +4,8 @@ A standalone Python script that converts a personal copy of the **AD&D Core Rule
 
 > **Copyright notice** — The script embeds no copyrighted content from the CD-ROM. It reads your local copy at runtime and generates a module on your machine. Do not redistribute the generated module.
 
+Once the module is installed, the [user guide](USER_GUIDE.md) explains what the script fills in the compendiums, what it leaves empty, and how to create a PHB or a Skills & Powers character.
+
 ---
 
 ## What it generates
@@ -142,3 +144,10 @@ Copy the generated `adnd2-compendium/` folder into your Foundry `Data/modules/` 
 
 Then in Foundry: **Settings → Manage Modules → AD&D 2e Compendium → Enable**.
 
+
+---
+
+## Using the module
+
+See the [user guide](USER_GUIDE.md) for what the script fills in the compendiums, what it
+leaves empty, and how to create a PHB or a Skills & Powers character.
