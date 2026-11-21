@@ -57,6 +57,7 @@ import string
 import struct
 import subprocess
 import tempfile
+import time
 import atexit
 from html.parser import HTMLParser
 import datetime
@@ -1850,11 +1851,37 @@ def parse_spell_record(buf, start, end):
     r['class_type_id'] = class_type_id
     r['level']         = level
     r['class_type'] = 'wizard' if r['class_type_id'] == 1 else 'priest'
-    # Walk Pascal strings: area, casting time, components, duration, range, save, school, +
-    fields_order = ['area_of_effect', 'casting_time', 'components',
-                    'duration', 'range', 'saving_throw', 'school']
     # Skip past the int32 header (20 bytes)
     p = p + 20
+    # The text block is POSITIONAL: area, casting time, components, critical,
+    # duration, knockdown, range, saving throw — each a Pascal string that may be
+    # EMPTY (length byte 0). Critical/knockdown are only filled for Spells &
+    # Magic spells ("Medium (1 hit)", "d8"); elsewhere they are empty, as are the
+    # components of quest spells. Skipping empty strings (the old scan) shifted
+    # duration→components and range→duration on ~113 spells. Read strictly; fall
+    # back to the tolerant scan only if a string runs past the record or holds
+    # control bytes.
+    strict = {}
+    q = p
+    for fname in ('area_of_effect', 'casting_time', 'components', 'critical',
+                  'duration', 'knockdown', 'range', 'saving_throw'):
+        if q >= end:
+            strict = None; break
+        n = buf[q]
+        seq = buf[q+1:q+1+n]
+        if q + 1 + n > end or any(b < 32 for b in seq):
+            strict = None; break
+        strict[fname] = seq.decode('cp1252', 'replace')
+        q += 1 + n
+    if strict is not None and strict.get('area_of_effect'):
+        for k, v in strict.items():
+            if v or k in ('components', 'range', 'duration'):
+                r[k] = v
+        p = q
+        fields_order = ['school']
+    else:
+        fields_order = ['area_of_effect', 'casting_time', 'components',
+                        'duration', 'range', 'saving_throw', 'school']
     for fname in fields_order:
         # Skip bytes until we find a valid Pascal string start (tolerates non-zero junk).
         # n >= 1 is intentional: casting_time is often a single digit ('1','2','3') and
@@ -6981,6 +7008,480 @@ def _make_spell_action_groups(name, save_type, damage_formula,
     return [_make_action_group(name, img, actions)]
 
 
+# ── Spell areas, auras and on-hit specials (lot "auras", 2026-11-21) ─────────
+# Decided once, by hand, from the CD (one-off scripts in plans/powers-detection-
+# scripts/detect_castshape.py); only SPELLS.DAT indices, shape kinds and regex
+# anchors are hardcoded. Every number (radius, length, bonus, die, level step,
+# maximum, duration, range) is read at build time from the spell's own DAT
+# fields (Area of Effect / Range / Duration) or from its description.
+#
+# _SPELL_CAST_SHAPES: index → AoE pattern kind. Adds a 'castshape' action (the
+# chat card's template button) after the cast action. Kinds (see _AOE_PATTERNS):
+#   r radius · rl radius per level · d diameter · sq cube/square · rect W x L
+#   path W x L line from the caster · cone_d / cone_wl / wedge cones.
+# SPELLS.DAT records whose Range field holds the school name on the CD itself
+# (Secret Page, Wall of Stone, True Seeing (P), False Seeing): the range is read
+# from the "Range:" line of the spell's own stat block instead.
+_SPELL_RANGE_FROM_PAGE = {111, 200, 546, 905}
+
+_SPELL_CAST_SHAPES = {
+    0: 'r',       # Affect Normal Fires — 10 ft radius
+    1: 'sq',      # Alarm — Up to 20 ft cube
+    9: 'wedge',   # Color Spray — 5 x 20 x 20 ft wedge
+    11: 'path',    # Detect Magic — 10 x 60 ft
+    16: 'r',       # Friends — 60 ft radius
+    18: 'rect',    # Grease — 10 x 10 ft
+    20: 'sq',      # Hypnotism — 30 ft cube
+    23: 'r',       # Light — 20-ft radius
+    36: 'r',       # Taunt — 30-ft radius
+    46: 'r',       # Continual Light — 60-ft radius
+    47: 'r',       # Darkness, 15' Radius — 15-ft radius
+    50: 'path',    # Detect Evil — 10 x 180 ft
+    53: 'r',       # Flaming Sphere — 3-ft radius
+    56: 'sq',      # Forget — 1-4 creatures in a 20 ft cube
+    57: 'sq',      # Glitterdust — 20 ft cube
+    58: 'sq',      # Hypnotic Pattern — 30-ft cube
+    61: 'r',       # Irritation — 1-4 creatures in a 15-ft radius
+    75: 'r',       # Scare — 15-ft radius
+    76: 'r',       # Shatter — 3-ft radius
+    78: 'sq',      # Stinking Cloud — 20-ft cube
+    80: 'sq',      # Summon Swarm — 10-ft cube
+    81: 'sq',      # Tasha's Uncontrollable Hideous Laughter — 1 or more creatures in a 30-ft cube
+    88: 'r',       # Delude — 30-ft radius
+    89: 'sq',      # Dispel Magic — 30-ft cube
+    90: 'r',       # Explosive Runes — 10-ft radius
+    92: 'r',       # Fireball — 20-ft radius
+    96: 'sq',      # Haste — 40-ft cube, 1 creature/lvl
+    103: 'd',       # Leomund's Tiny Hut — 15-ft-diameter sphere
+    113: 'sq',      # Slow — 40-ft cube, 1 creature/lvl
+    116: 'r',       # Tongues — 30-ft radius
+    121: 'r',       # Charm Monster — 1 or more creatures in 20-ft radius
+    122: 'sq',      # Confusion — Up to 60-ft cube
+    124: 'r',       # Detect Scrying — 120-ft radius
+    127: 'sq',      # Emotion — 20-ft cube
+    132: 'cone_d',  # Fear — 60-ft cone, 30-ft diameter at end, 5 ft at base
+    133: 'r',       # Fire Charm — 15-ft radius
+    136: 'sq',      # Fumble — 30-ft cube
+    152: 'sq',      # Rainbow Pattern — 30-ft cube
+    155: 'sq',      # Shadow Monsters — 20-ft cube
+    156: 'cone_wl', # Shout — 10 x 30 ft cone
+    159: 'r',       # Vacancy — 10-ft radius/lvl
+    169: 'sq',      # Chaos — Up to 40-ft cube
+    179: 'r',       # False Vision — 30-ft radius
+    181: 'sq',      # Hold Monster — 1-4 creatures in a 40-ft cube
+    182: 'r',       # Leomund's Lamentable Belaborment — 1 or more creatures in a 10-ft radius
+    194: 'sq',      # Summon Shadow — 10-ft cube
+    222: 'rl',      # Mirage Arcana — 10 ft/lvl radius
+    234: 'sq',      # Shades — 20-ft cube
+    240: 'r',       # Banishment — 60-ft radius
+    242: 'rect',    # Charm Plants — 10 x 30 ft
+    244: 'r',       # Delayed Blast Fireball — 20-ft radius
+    248: 'sq',      # Forcecage — 20-ft cube
+    250: 'rect',    # Mass Invisibility — 60 x 60 yds
+    257: 'rect',    # Reverse Gravity — 30 ft x 30 ft
+    273: 'sq',      # Mass Charm — 30-ft cube
+    281: 'r',       # Power Word, Blind — 15-ft radius
+    297: 'r',       # Mordenkainen's Disjunction — 30-ft radius
+    298: 'r',       # Power Word, Kill — 10-ft radius
+    303: 'r',       # Time Stop — 15-ft radius
+    304: 'r',       # Weird — 20-ft radius
+    314: 'r',       # Stabilize — 30-ft-radius circle
+    341: 'r',       # Suffocate — 10-ft-radius circle
+    342: 'sq',      # Abi-Dalzim's Horrid Wilting — 30-ft cube
+    356: 'r',       # Minor Malison — 30-ft-radius sphere
+    357: 'r',       # Greater Malison — 30-ft-radius sphere
+    359: 'sq',      # Mind Fog — 20-ft cube
+    369: 'cone_wl', # Thunder Staff — 20' x 40' cone
+    373: 'd',       # Acid Storm — 40-ft-diameter circle
+    380: 'sq',      # Patternweave — 10-ft sq
+    389: 'r',       # Wail of the Banshee — 30-ft-radius sphere
+    391: 'path',    # Detect Phase — 10 x 60 ft
+    406: 'path',    # Lance of Disruption — 5 ft x 60 ft
+    409: 'r',       # Vitriolic Sphere — 5-ft radius
+    434: 'r',       # Continual Darkness — 60-ft. radius
+    453: 'r',       # Babble — 30-ft radius
+    463: 'sq',      # Demi-shadow Monsters — 20-ft cube
+    480: 'sq',      # Bless — 50-ft cube
+    482: 'path',    # Detect Evil — 10 ft x 120 yds
+    490: 'sq',      # Snake Charm — 30-ft cube
+    492: 'sq',      # Hold Animal — 1-4 animals in 40-ft cube
+    498: 'sq',      # Animal Growth — Up to 8 animals in a 20-ft sq
+    507: 'r',       # Enthrall — 90-ft radius
+    508: 'sq',      # Hold Person — 1d4 persons in 20-ft cube
+    513: 'sq',      # Confusion — 1d4 creatures in 40-ft sq.
+    520: 'r',       # Flame Strike — 5 ft radius x 30 ft column
+    522: 'r',       # Holy Word — 30-ft radius
+    530: 'path',    # Detect Magic — 10 ft x 30 yds
+    532: 'path',    # Detect Snares & Pits — 10 x 40 ft
+    535: 'path',    # Find Traps — 10 ft x 30 yds
+    561: 'sq',      # Produce Fire — 12-ft sq
+    578: 'r',       # Wyvern Watch — 10-ft radius
+    580: 'r',       # Symbol — 60 ft radius
+    599: 'sq',      # Entangle — 40-ft cube
+    610: 'sq',      # Hold Plant — 1d4 plants in 40-ft sq
+    612: 'r',       # Speak With Plants — 30-ft radius
+    613: 'sq',      # Sticks to Snakes — 1d4 sticks + 1 stick/lvl in a 10-ft cube
+    628: 'sq',      # Remove Paralysis — 1d4 creatures in 20-ft cube
+    639: 'r',       # Light — 20-ft radius globe
+    640: 'r',       # Continual Light — 60-ft radius
+    642: 'r',       # Moonbeam — 5 ft radius + special
+    644: 'r',       # Sunray — 5-ft radius (special)
+    647: 'r',       # Call Lightning — 10-ft radius
+    649: 'rl',      # Control Winds — 40-ft/lvl radius
+    665: 'd',       # Music of the Spheres — 20-ft diameter circle
+    681: 'sq',      # Cloud of Purification — 20-ft cube
+    695: 'r',       # Moment — 50-ft radius
+    704: 'd',       # Spacewarp — 50-ft-diameter sphere
+    727: 'd',       # Group Mind — 30-yd-diameter circle
+    730: 'r',       # Hesitation — 20-ft radius circle
+    744: 'sq',      # Lighten Load — 10-ft cube
+    748: 'd',       # Circle of Privacy — 50-ft diameter circle
+    752: 'r',       # Monster Mount — 20-ft radius circle
+    793: 'r',       # Circle of Sunmotes — 60-ft-radius hemisphere
+    794: 'd',       # Conformance — 80-ft-diameter sphere
+    807: 'r',       # Reversion — 10-ft-radius sphere
+    810: 'r',       # Shooting Stars — 40-yd radius
+    812: 'd',       # Spiral of Degeneration — 50-ft-diameter
+    814: 'r',       # Storm of Vengeance — 120-yd radius circle
+    815: 'r',       # Transformation — 100-yd-radius sphere
+    843: 'sq',      # Dictate — Up to 6 creatures in a 20-ft cube
+    873: 'sq',      # Curse — 50-ft cube
+    875: 'path',    # Detect Good — 10 ft x 120 yds
+    876: 'r',       # Darkness — 20-ft radius globe
+    885: 'r',       # Continual Darkness — 60-ft radius
+    898: 'sq',      # Quench Fire — 12-ft sq
+    899: 'sq',      # Snakes to Sticks — 1d4 sticks + 1 stick/lvl in a 10-ft cube
+    900: 'sq',      # Shrink Animal — Up to 8 animals in a 20-ft sq
+    911: 'r',       # Unholy Word — 30-ft radius
+}
+
+_FT_PER = {'ft': 1, 'foot': 1, 'feet': 1, "'": 1, 'yd': 3, 'yds': 3, 'yard': 3, 'yards': 3}
+_AOE_U = r"(ft|foot|feet|yds?|yards?|')"
+_AOE_PATTERNS = {
+    'r':       (r'(\d+)[- \']*' + _AOE_U + r'\.?[- ]*radius', 'circle'),
+    'rl':      (r'(\d+)[- ]*' + _AOE_U + r'(?:/lvl[- ]radius|[- ]radius/lvl)', 'circle'),
+    'd':       (r'(\d+)[- ]*' + _AOE_U + r'[- ]*diam[ea]ter', 'circle'),
+    'sq':      (r'(\d+)[- ]*' + _AOE_U + r'\.?[- ]*(?:cube|sq)', 'rectangle'),
+    'rect':    (r'(\d+)[- ]*' + _AOE_U + r'?\s*x\s*(\d+)[- ]*' + _AOE_U, 'rectangle'),
+    'path':    (r'(\d+)[- ]*' + _AOE_U + r'?\s*x\s*(\d+)[- ]*' + _AOE_U, 'ray'),
+    'cone_d':  (r'(\d+)[- ]*' + _AOE_U + r'[- ]cone, (\d+)[- ]*' + _AOE_U + r'[- ]diameter', 'cone'),
+    'cone_wl': (r'(\d+)[- ]*' + _AOE_U + r'?\s*x\s*(\d+)[- ]*' + _AOE_U + r'\s*cone', 'cone'),
+    'wedge':   (r'\d+\s*x\s*(\d+)\s*x\s*(\d+)[- ]*' + _AOE_U + r'\s*wedge', 'cone'),
+}
+
+
+def _spell_level_var(cls):
+    return '@rank.levels.divine' if cls == 'priest' else '@rank.levels.arcane'
+
+
+def _fmt_num(x):
+    return str(int(x)) if float(x).is_integer() else str(x)
+
+
+def _to_ft(n, unit):
+    return int(n) * _FT_PER.get((unit or 'ft').lower(), 1)
+
+
+def _spell_aoe_shape(kind, aoe, lvl):
+    """Cast-shape geometry from the DAT Area of Effect string, in feet:
+    (shape, {radius|length|width: formula}) or None if the anchor misses."""
+    rx, shape = _AOE_PATTERNS[kind]
+    m = re.search(rx, aoe or '', re.I)
+    if not m:
+        return None
+    g = m.groups()
+    if kind == 'r':
+        return shape, {'radius': str(_to_ft(g[0], g[1]))}
+    if kind == 'rl':
+        return shape, {'radius': f'({_to_ft(g[0], g[1])}*{lvl})'}
+    if kind == 'd':
+        return shape, {'radius': _fmt_num(_to_ft(g[0], g[1]) / 2)}
+    if kind == 'sq':
+        n = str(_to_ft(g[0], g[1]))
+        return shape, {'length': n, 'width': n}
+    if kind in ('rect', 'path', 'cone_wl'):
+        w, l = _to_ft(g[0], g[1] or g[3]), _to_ft(g[2], g[3])
+        return shape, {'length': str(l), 'width': str(w)}
+    if kind == 'cone_d':
+        return shape, {'length': str(_to_ft(g[0], g[1])), 'width': str(_to_ft(g[2], g[3]))}
+    if kind == 'wedge':
+        return shape, {'length': str(_to_ft(g[0], g[2])), 'width': str(_to_ft(g[1], g[2]))}
+    return None
+
+
+_RANGE_RE = re.compile(
+    r'(\d+)\s*(yds?|yards?|ft|feet)\.?(\s*/\s*(\d+)?\s*(?:lvls?|levels?))?'
+    r'(?:\s*\+\s*(\d+)\s*(yds?|yards?|ft|feet)\.?\s*/\s*(?:lvl|level))?', re.I)
+
+
+def _spell_range_formula(rng, lvl):
+    """Range in feet from the DAT Range field ('10 yds + 10 yds/lvl',
+    '5 yds/2 lvls', '60 ft'); '' for 0 / Touch / Special / unparseable."""
+    m = _RANGE_RE.fullmatch((rng or '').strip().rstrip('.'))
+    if not m:
+        return ''
+    n, u, per_lvl, per, m2, u2 = m.groups()
+    base = _to_ft(n, u)
+    if per_lvl:                                     # "N yds/lvl" or "N yds/2 lvls"
+        out = f'({base}*' + (f'floor({lvl}/{per}))' if per else f'{lvl})')
+    else:
+        out = str(base)
+    if m2:
+        out += f'+({_to_ft(m2, u2)}*{lvl})'
+    return out
+
+
+_DUR_UNITS = {'rd': 'round', 'round': 'round', 'turn': 'turn', 'hr': 'hour',
+              'hour': 'hour', 'day': 'day'}
+_DUR_RE = re.compile(
+    r'(\d+)\s*(rd|round|turn|hr|hour|day)s?\.?\s*(/\s*(?:lvl|level))?'
+    r'(?:\s*\+\s*(\d+)\s*(rd|round|turn|hr|hour|day)s?\.?\s*/\s*(?:lvl|level))?', re.I)
+
+
+def _spell_duration(dur, lvl):
+    """{'formula', 'type'} from the DAT Duration field ('2 rounds/level',
+    '4 turns + 1 turn/level', '6 turns'). Mixed units or anything else →
+    empty formula (the GM ends the effect)."""
+    m = _DUR_RE.fullmatch((dur or '').strip().rstrip('.'))
+    if not m:
+        return {'formula': '', 'type': 'round'}
+    a, ua, per, b, ub = m.groups()
+    ua = _DUR_UNITS[ua.lower()]
+    if b and _DUR_UNITS[ub.lower()] != ua:
+        return {'formula': '', 'type': 'round'}
+    if per:
+        f = lvl if a == '1' else f'({a}*{lvl})'
+    else:
+        f = a
+    if b:
+        f += f'+{lvl}' if b == '1' else f'+({b}*{lvl})'
+    return {'formula': f, 'type': ua}
+
+
+def _text_of(html):
+    if not html:
+        return ''
+    t = BeautifulSoup(html, 'html.parser').get_text(' ')
+    return re.sub(r'\s+', ' ', t.replace('–', '-').replace('−', '-'))
+
+
+def _num(g):
+    g = (g or '').lower()
+    return int(g) if g.isdigit() else _WORD_NUM.get(g)
+
+
+# _SPELL_AURAS: index → {'aoe': kind ('r' / 'd'), 'effects': [...]}.
+# Each effect becomes an 'effect' action carrying a native ARS aura
+# (effect.system.aura) whose radius is read from the DAT Area of Effect.
+#   name   - action name
+#   disp   - aura disposition: friendly / hostile / all
+#   src    - read the anchors in that spell's description instead (the
+#            10' Radius and "Good" variants refer to Protection From Evil)
+#   read   - {placeholder: anchor}: group 1 of the anchor fills '{placeholder}';
+#            a ':levels' placeholder keeps the digits of the match ("1st-, 2nd-,
+#            or 3rd-" → "1,2,3"). A missing anchor drops the effect.
+#   ch     - [(key, type, value template)] — 'aura.'-prefixed keys are handed
+#            to every token in the region (ARS strips the prefix)
+#   aura   - False for a plain (non-aura) effect on the touched creature
+#   tgt    - 'single' when the aura is centred on a touched / chosen creature
+#            (default: on the caster, applied to self)
+_CHANT_UP = r'friendly to the priest gain \+(\d+) bonuses'
+_CHANT_DN = r"priest's enemies suffer -(\d+) penalties"
+
+
+def _atk_dmg_save(s):
+    return [('aura.system.mods.attack.value', 'add', s),
+            ('aura.system.mods.damage.value', 'add', s),
+            ('aura.system.mods.saves.all', 'custom', '{{"formula":"' + s + '","properties":""}}')]
+
+
+def _atk_save(s):
+    return [('aura.system.mods.attack.value', 'add', s),
+            ('aura.system.mods.saves.all', 'custom', '{{"formula":"' + s + '","properties":""}}')]
+
+
+_PFE_W = {'a': r'suffer -(\d+) penalties to attack rolls', 's': r'are made with \+(\d+) bonuses'}
+_PFE_P = {'a': r'receive a penalty of -(\d+) to each attack roll', 's': r'protected creature with a \+(\d+) bonus'}
+_EVIL, _GOOD = 'le,ce,ne', 'lg,cg,ng'
+
+
+def _pfe(trigger, prefix=''):
+    return [(prefix + 'attacker.alignment', 'custom',
+             '{{"trigger":"' + trigger + '","type":"attack","properties":"","formula":"-{a}"}}'),
+            (prefix + 'attacker.alignment', 'custom',
+             '{{"trigger":"' + trigger + '","type":"save","properties":"","formula":"{s}"}}')]
+
+
+def _zone(disp='all', aoe='r', tgt='self'):
+    return {'aoe': aoe, 'effects': [dict(name='Area', disp=disp, tgt=tgt, read={}, ch=[])]}
+
+
+_GLOBE = dict(name='Globe', disp='all', read={'lv:levels': r'prevents any (.*?)level spell effects'},
+              ch=[('aura.system.mods.immunespelllevel', 'custom', '{lv}')])
+_SPELL_AURAS = {
+    517: {'aoe': 'r', 'effects': [                       # Chant
+        dict(name='Allies', disp='friendly', read={'b': _CHANT_UP}, ch=_atk_dmg_save('{b}')),
+        dict(name='Enemies', disp='hostile', read={'p': _CHANT_DN}, ch=_atk_dmg_save('-{p}'))]},
+    519: {'aoe': 'r', 'effects': [                       # Prayer
+        dict(name='Allies', disp='friendly', read={'b': _CHANT_UP}, ch=_atk_dmg_save('{b}')),
+        dict(name='Enemies', disp='hostile', read={'p': _CHANT_DN}, ch=_atk_dmg_save('-{p}'))]},
+    856: {'aoe': 'r', 'effects': [                       # Recitation
+        dict(name='Allies', disp='friendly',
+             read={'b': r'Allies of the priest gain a \+(\d+) bonus to attack rolls and saving throws'},
+             ch=_atk_save('{b}')),
+        dict(name='Enemies', disp='hostile',
+             read={'p': r'Enemies suffer a -(\d+) penalty to attack rolls and saving throws'},
+             ch=_atk_save('-{p}'))]},
+    865: {'aoe': 'r', 'effects': [                       # Righteous Wrath of the Faithful
+        dict(name='Allies', disp='friendly',
+             read={'b': r'gaining a \+(\d+) bonus to attack rolls and saving throws'}, ch=_atk_save('{b}'))]},
+    109: {'aoe': 'r', 'effects': [dict(name='Protection', disp='friendly', tgt='single', src=441, read=_PFE_W,
+                                       ch=_pfe(_EVIL, 'aura.'))]},    # Protection From Evil, 10' Radius (W)
+    442: {'aoe': 'r', 'effects': [dict(name='Protection', disp='friendly', tgt='single', src=441, read=_PFE_W,
+                                       ch=_pfe(_GOOD, 'aura.'))]},    # Protection From Good, 10' Radius (W)
+    918: {'aoe': 'r', 'effects': [dict(name='Protection', disp='friendly', tgt='single', src=620, read=_PFE_P,
+                                       ch=_pfe(_EVIL, 'aura.'))]},    # Protection From Evil, 10' Radius (P)
+    919: {'aoe': 'r', 'effects': [dict(name='Protection', disp='friendly', tgt='single', src=620, read=_PFE_P,
+                                       ch=_pfe(_GOOD, 'aura.'))]},    # Protection From Good, 10' Radius (P)
+    441: {'effects': [dict(name='Protection', aura=False, read=_PFE_W, ch=_pfe(_EVIL))]},           # Protection From Evil (W)
+    433: {'effects': [dict(name='Protection', aura=False, src=441, read=_PFE_W, ch=_pfe(_GOOD))]},  # Protection from Good (W)
+    620: {'effects': [dict(name='Protection', aura=False, read=_PFE_P, ch=_pfe(_EVIL))]},           # Protection From Evil (P)
+    877: {'effects': [dict(name='Protection', aura=False, src=620, read=_PFE_P, ch=_pfe(_GOOD))]},  # Protection From Good (P)
+    145: {'aoe': 'r', 'effects': [_GLOBE]},              # Minor Globe of Invulnerability
+    216: {'aoe': 'r', 'effects': [_GLOBE]},              # Globe of Invulnerability
+    577: {'aoe': 'r', 'effects': [dict(name='Silence', disp='all', tgt='single', read={},
+                                       ch=[('aura.special.status', 'custom', 'silence')])]},   # Silence, 15-foot Radius
+    101: _zone('friendly', tgt='single'),                              # Invisibility, 10' Radius
+    497: _zone(), 501: _zone(), 869: _zone(),            # Repel Insects, Anti-Animal Shell, Antimineral Shell
+    614: _zone(aoe='d'),                                 # Anti-Plant Shell
+    648: _zone(), 164: _zone(), 299: _zone(),            # Control Temperature 10', Airy Water, Prismatic Sphere
+    310: _zone(), 684: _zone(), 811: _zone(),            # Safeguarding, Unceasing Vigilance, Sphere of Security
+}
+
+# _SPELL_HIT_SPECIALS: index → (change key, anchor, value template, on self?).
+# The anchor's groups ({1}…{4}; word numbers allowed) fill the template; ARS
+# evaluates [[…]] when the effect is applied, so the count is rolled per cast.
+_SPELL_HIT_SPECIALS = {
+    69: ('special.mirrorimage',                          # Mirror Image
+         r'roll (\d+d\d+) and add (\w+) for every (\w+) levels of experience the wizard has achieved, to a maximum of (\w+) images',
+         '[[min({4}, {1} + {2}*floor({lvl}/{3}))]]', True),
+    158: ('special.stoneskin',                           # Stoneskin
+          r'blocks (\d+d\d+) attacks, plus (\w+) attacks? per (\w+) levels',
+          '[[{1} + {2}*floor({lvl}/{3})]]', False),
+}
+# Displacement (ARS special.displacement: the first attack of each opponent in
+# a combat misses). Not a 2e spell: a permanent property of these records.
+_DISPLACEMENT_ITEMS = {2064}      # PARTS.DAT: Cloak of Displacement (worn → transferred)
+_DISPLACEMENT_MONSTERS = {133}    # MONSTER.DAT: Displacer Beast (innate)
+
+
+def _displacement_effect(name, origin):
+    return _make_effect_doc(f'{name} (Displacement)', 'icons/magic/defensive/illusion-evasion-echo-purple.webp',
+                            [{'key': 'special.displacement', 'type': 'custom', 'value': ''}],
+                            origin, transfer=True)
+
+
+_AURA_COLORS = {'friendly': '#3a8f3a', 'hostile': '#a83232', 'all': '#c9b037'}
+
+
+def _effect_action(name, img, changes, duration, targeting='single', applyself=False, aura=None):
+    act = _make_action(name, type_='effect', img=img, targeting=targeting,
+                       effect_changes=[{'key': k, 'type': t, 'value': v} for k, t, v in changes])
+    act['effect']['duration'] = duration
+    act['effect']['system'] = {
+        'applyself': applyself, 'visibility': 'default', 'showIcon': 1, 'afterEffects': [],
+        'aura': {'enabled': False, 'distance': 10, 'shape': 'circle', 'disposition': 'friendly',
+                 'permission': 'all', 'color': '#ff0000', 'opacity': 0.35, 'includeSource': False,
+                 **(aura or {})}}
+    return act
+
+
+_SPELL_AREA_STATS = {'castshape': 0, 'aura': 0, 'effect': 0, 'special': 0, 'missed': []}
+
+
+def _add_spell_area_actions(item, idx, spell, items_by_index):
+    """Append the curated castshape / aura / on-hit special actions to a spell's
+    action group. Returns the number of actions added."""
+    groups = item['system'].get('actionGroups') or []
+    if not groups:
+        return 0
+    group = groups[0]
+    img = item.get('img', '')
+    lvl = _spell_level_var(spell.get('class_type'))
+    st = _SPELL_AREA_STATS
+    added = []
+    kind = _SPELL_CAST_SHAPES.get(idx)
+    if kind:
+        geo = _spell_aoe_shape(kind, spell.get('area_of_effect'), lvl)
+        if geo:
+            shape, props = geo
+            act = _make_action('Area', type_='castshape', img=img, targeting='')
+            cs = act['castShape']
+            cs['shape']['type'] = shape
+            for k, v in props.items():
+                cs['properties'][k]['formula'] = v
+            cs['properties']['range']['formula'] = _spell_range_formula(spell.get('range'), lvl)
+            added.append(act); st['castshape'] += 1
+        else:
+            st['missed'].append((idx, 'castshape'))
+    entry = _SPELL_AURAS.get(idx)
+    if entry:
+        duration = _spell_duration(spell.get('duration'), lvl)
+        radius = None
+        if entry.get('aoe'):
+            geo = _spell_aoe_shape(entry['aoe'], spell.get('area_of_effect'), lvl)
+            radius = float(geo[1]['radius']) if geo else None
+        for eff in entry['effects']:
+            src = items_by_index.get(eff.get('src', idx))
+            text = _text_of(src['system'].get('description')) if src else ''
+            vals, ok = {}, True
+            for ph, rx in eff['read'].items():
+                m = re.search(rx, text, re.I)
+                if not m:
+                    ok = False
+                    break
+                name, _, mode = ph.partition(':')
+                vals[name] = ','.join(re.findall(r'\d+', m.group(1))) if mode == 'levels' else m.group(1)
+            if not ok or (eff.get('aura', True) and radius is None):
+                st['missed'].append((idx, eff['name']))
+                continue
+            changes = [(k, t, v.format(**vals)) for k, t, v in eff['ch']]
+            if eff.get('aura', True):
+                disp = eff['disp']
+                on_self = eff.get('tgt', 'self') == 'self'
+                added.append(_effect_action(
+                    eff['name'], img, changes, duration,
+                    targeting='self' if on_self else 'single', applyself=on_self,
+                    # the caster / recipient is inside its own friendly area
+                    aura={'enabled': True, 'distance': radius, 'disposition': disp,
+                          'includeSource': disp != 'hostile',
+                          'color': _AURA_COLORS[disp], 'opacity': 0.1}))
+                st['aura'] += 1
+            else:
+                added.append(_effect_action(eff['name'], img, changes, duration))
+                st['effect'] += 1
+    hs = _SPELL_HIT_SPECIALS.get(idx)
+    if hs:
+        key, rx, tpl, self_ = hs
+        m = re.search(rx, _text_of(item['system'].get('description')), re.I)
+        nums = [g if re.fullmatch(r'\d+d\d+', g) else _num(g) for g in m.groups()] if m else [None]
+        if None in nums:
+            st['missed'].append((idx, key))
+        else:
+            val = tpl.replace('{lvl}', lvl)
+            for i, g in enumerate(nums, 1):
+                val = val.replace('{%d}' % i, str(g))
+            added.append(_effect_action(
+                item['name'], img, [(key, 'custom', val)],
+                _spell_duration(spell.get('duration'), lvl),
+                targeting='self' if self_ else 'single', applyself=self_))
+            st['special'] += 1
+    for i, a in enumerate(added, start=len(group['actions'])):
+        a['sort'] = i
+    group['actions'].extend(added)
+    return len(added)
+
+
 def _parse_spell_components(raw):
     """Parse a V/S/M components string into the ARS bool dict {verbal, somatic, material}.
     Returns all-False when raw is absent or contains non-component text."""
@@ -7451,9 +7952,6 @@ def make_monster_actor(monster, img_path=None, categories=None, fighter_saves=No
         # apply its own placeholder defaults; we don't claim any here.
         "attributes": attributes,
         "details":    details,
-        # NPCs save as fighters by HD in ARS Variant 2 (matrixTable default
-        # "fighter"); set it explicitly so THAC0/save derivation is consistent.
-        "matrixTable": "fighter",
         "organization":  monster.get('organization', ''),
         "activity":      monster.get('activity_cycle', ''),
         "diet":          monster.get('diet', ''),
@@ -7716,21 +8214,33 @@ def _finalize_with_fvtt_cli():
     packs_dir = os.path.dirname(OUTPUT_DB)   # adnd2-compendium/packs/
     os.makedirs(packs_dir, exist_ok=True)
 
+    # LevelDB renames its files while it writes (…dbtmp → CURRENT). Inside a
+    # synced folder (OneDrive) or under an on-access antivirus scan, Windows
+    # can refuse such a rename ("Accès refusé"). So every pack is compiled in a
+    # local temp folder and only the finished pack is copied into the module,
+    # with a few retries if a file of the old pack is still held.
+    def _retry(fn, *a):
+        for attempt in range(5):
+            try:
+                return fn(*a)
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(2)
+
+    tmp_root = tempfile.mkdtemp(prefix='adnd2-packs-')
     ok = fail = 0
     for pack_name in sorted(_listdir(_PACK_SRC_BASE)):
         src = os.path.join(_PACK_SRC_BASE, pack_name)
         if not os.path.isdir(src):
             continue
-        # Remove existing pack dir so fvtt-cli starts clean
         existing = os.path.join(packs_dir, pack_name)
-        if os.path.exists(existing):
-            shutil.rmtree(existing)
 
         # --out = parent dir; fvtt-cli writes to parent/pack_name/.
         # Use abspath so fvtt-cli (Node.js) receives OS-native absolute paths;
         # on Windows this avoids forward slashes being misread as cmd.exe flags.
         src_abs   = os.path.abspath(src)
-        packs_abs = os.path.abspath(packs_dir)
+        packs_abs = tmp_root
         # _FVTT_CLI_CMD may be a string ('fvtt') or a list (['npx', '@foundryvtt/foundryvtt-cli'])
         cli = _FVTT_CLI_CMD if isinstance(_FVTT_CLI_CMD, list) else [_FVTT_CLI_CMD]
         cmd = cli + ['package', 'pack', '-n', pack_name,
@@ -7742,6 +8252,14 @@ def _finalize_with_fvtt_cli():
                                 encoding='utf-8', errors='replace')
         n      = len([f for f in _listdir(src) if f.endswith('.json')])
         if result.returncode == 0:
+            try:
+                if os.path.exists(existing):
+                    _retry(shutil.rmtree, existing)
+                _retry(shutil.copytree, os.path.join(tmp_root, pack_name), existing)
+            except OSError as e:
+                print(f"  ✗ {pack_name}: copy into the module failed: {e}")
+                fail += 1
+                continue
             print(f"  ✓ {pack_name} ({n} docs)")
             ok += 1
         else:
@@ -7750,8 +8268,10 @@ def _finalize_with_fvtt_cli():
             fail += 1
 
     print(f"  → {ok} packs OK, {fail} failed")
+    shutil.rmtree(tmp_root, ignore_errors=True)
     if fail == 0:
         shutil.rmtree(_PACK_SRC_BASE)   # clean up staging dir on full success
+    return fail
 
 
 def _race_portrait_for(race):
@@ -10419,6 +10939,11 @@ def migrate_items():
             item['system']['description'] = desc_by_index.get(src, '')
         powers_added += _add_item_spell_powers(item, part_index)
         mech_added += _add_item_mechanic_actions(item, part_index)
+        if part_index in _DISPLACEMENT_ITEMS:
+            ef = _displacement_effect(item['name'],
+                                      f"Compendium.{MODULE_ID}.adnd2-items.Item.{item['_id']}")
+            item_effects = list(item_effects) + [ef]
+            item.setdefault('effects', []).append(ef['_id'])
         bucket = TYPE_FOLDER.get(item.get('type', ''), 'Other Items')
         item['folder'] = folders[bucket]['_id']
         db.put(f'!items!{item["_id"]}'.encode(), json.dumps(item).encode())
@@ -10479,8 +11004,22 @@ def migrate_spells():
     # ── Pass A: build all spell items in memory, drop the description-less,
     # capture by lowercase name so the post-pass can link reversibles.
     items_by_name = {}      # name_lower → (spell_dict, item_dict, folder_key)
+    built = {idx: make_spell_item(spell, desc_override_rel=_SPELL_DESC_HTM_INDEX.get(idx))
+             for idx, spell in enumerate(spells)}
+    for i in _SPELL_RANGE_FROM_PAGE:
+        if i in built:
+            m = re.search(r'Range:\s*(.*?)\s*Components:',
+                          _text_of(built[i]['system'].get('description')))
+            if m:
+                built[i]['system']['range'] = spells[i]['range'] = m.group(1)
+    area_added = sum(_add_spell_area_actions(built[i], i, spells[i], built) for i in built)
+    st = _SPELL_AREA_STATS
+    print(f"  {area_added} area actions on spells ({st['castshape']} templates, "
+          f"{st['aura']} auras, {st['effect']} effects, {st['special']} hit specials)")
+    if st['missed']:
+        print(f"  ⚠ area anchors not found: {st['missed']}")
     for idx, spell in enumerate(spells):
-        item = make_spell_item(spell, desc_override_rel=_SPELL_DESC_HTM_INDEX.get(idx))
+        item = built[idx]
         _SPELL_ITEMS_BY_INDEX[idx] = item
         # Drop spells whose description came up empty after every
         # name-normalization attempt — they're SPELLS.DAT records whose
@@ -10831,7 +11370,7 @@ def migrate_monsters():
 
     embed_index = _build_mm_embed_index()
     count = 0
-    for monster in monsters:
+    for mon_index, monster in enumerate(monsters):
         key  = _match_montype_key(monster.get('name',''), monster.get('display_name',''), montype_data)
         bmp  = montype_data.get(key) if key else None
         img  = extract_monster_icon(bmp, OUTPUT_IMG_MONSTERS) if bmp else None
@@ -10843,6 +11382,11 @@ def migrate_monsters():
         first = name[0].upper() if name else 'Z'
         bucket = first if first in folders else 'Other'
         actor['folder'] = folders[bucket]['_id']
+        if mon_index in _DISPLACEMENT_MONSTERS:
+            ef = _displacement_effect(actor['name'], None)
+            ef['transfer'] = False
+            actor.setdefault('effects', []).append(ef['_id'])
+            db.put(f'!actors.effects!{actor["_id"]}.{ef["_id"]}'.encode(), json.dumps(ef).encode())
         db.put(f'!actors!{actor["_id"]}'.encode(), json.dumps(actor).encode())
         count += 1
         if count % 500 == 0:
@@ -13257,7 +13801,7 @@ def main():
 
     # ─── fvtt-cli pack ────────────────────────────────────────────────────────
     _stabilize_ids()
-    _finalize_with_fvtt_cli()
+    pack_failures = _finalize_with_fvtt_cli()
 
     # ─── Module manifest ──────────────────────────────────────────────────────
     write_module_json(stats)
@@ -13277,6 +13821,10 @@ def main():
               f"Skills (rogue + NWP): {phase3_stats.get('skills', 0)}, "
               f"Character Kits (backgrounds): {phase3_stats.get('backgrounds', 0)}")
         print(f"  Phase 5 — Treasure roll tables: {phase3_stats.get('treasure', 0)}")
+    if pack_failures:
+        print(f"\n✗ {pack_failures} pack(s) failed — the module is INCOMPLETE. "
+              f"Close Foundry, pause OneDrive syncing and run again.")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

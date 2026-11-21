@@ -92,6 +92,26 @@ missile weapons.
 
 ![Dagger](docs/images/weapon-dagger-modes.png)
 
+## Spells
+
+Filled: level, school or sphere, range, components, duration, casting time, area of effect
+and saving throw, plus a **Cast** action (and a damage or healing roll when the spell has one).
+Some spells have extra actions:
+
+- **Area**: places the template of the area of effect (circle, cone, line, square), with the
+  spell's range shown. 128 spells.
+- **Auras**: an effect whose area follows the token and applies to whoever is inside —
+  Chant, Prayer and Recitation (bonus for allies, penalty for enemies), Protection From Evil
+  and Good 10' Radius, the globes of invulnerability (immunity to spells of the listed
+  levels), Silence 15' Radius (silence status), and the shells and spheres (area shown only).
+  Apply it to the caster, or to the creature the spell is cast on.
+- **Effects**: Protection From Evil and Good on the creature touched; Mirror Image and
+  Stoneskin, whose number of images or blocked attacks is rolled when the effect is applied
+  and goes down with each attack.
+
+Left empty: every other spell effect (charm, hold, sleep, light and darkness…). The GM
+applies them.
+
 ## Magic items
 
 Filled, as actions:
@@ -112,6 +132,7 @@ Left empty:
   ![Item charges](docs/images/item-charges.png)
 
 - **Passive effects** of worn items (bonuses to AC, saving throws, ability scores…) and the
-  temporary effects of potions.
+  temporary effects of potions. Exception: the cloak of displacement (and the displacer
+  beast) make the first attack of each opponent miss, as long as the cloak is equipped.
 - No action for items that summon a creature, for flying and movement items, or for the
   necklace of missiles (the strength of its missiles is rolled per necklace).
