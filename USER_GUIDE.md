@@ -99,16 +99,22 @@ Filled: level, school or sphere, range, components, duration, casting time, area
 and saving throw, plus a **Cast** action (and a damage or healing roll when the spell has one).
 Some spells have extra actions:
 
-- **Area**: places the template of the area of effect (circle, cone, line, square), with the
-  spell's range shown. 128 spells.
+- **Area**: the **Place Template** button of the spell's chat card places the template of the
+  area of effect (circle, cone, line, square), with the spell's range shown. 128 spells.
 - **Auras**: an effect whose area follows the token and applies to whoever is inside —
   Chant, Prayer and Recitation (bonus for allies, penalty for enemies), Protection From Evil
   and Good 10' Radius, the globes of invulnerability (immunity to spells of the listed
   levels), Silence 15' Radius (silence status), and the shells and spheres (area shown only).
-  Apply it to the caster, or to the creature the spell is cast on.
 - **Effects**: Protection From Evil and Good on the creature touched; Mirror Image and
   Stoneskin, whose number of images or blocked attacks is rolled when the effect is applied
   and goes down with each attack.
+
+To apply an aura or an effect, click its **Effect (…)** button in the chat card. When the
+spell is centred on the caster, the effect goes on the caster's token by itself. When it is
+cast on another creature (touch, Silence, Protection 10' Radius, Stoneskin), target that
+creature's token first.
+
+![Prayer](docs/images/spell-prayer-card.png)
 
 Left empty: every other spell effect (charm, hold, sleep, light and darkness…). The GM
 applies them.
@@ -124,6 +130,10 @@ Filled, as actions:
   potions, ring of the ram, robe of stars…).
 - **Strikes that spend charges** for the staves and rods that need them (staff of striking,
   staff of power, rod of smiting…): an attack that uses the charges, then the damage roll.
+  Use these **Strike** actions to spend charges: the weapon's normal attack keeps its magic
+  bonus but spends nothing.
+
+  ![Staff of striking](docs/images/item-staff-strikes.png)
 
 Every magic item has its **Magic** box ticked.
 
@@ -131,15 +141,19 @@ Every magic item has its **Magic** box ticked.
 
 Left empty:
 
-- **Charges.** Set them when the item is found, in the item's *Attributes* tab (**Maximum**
-  and **Used**). Until then, the powers that cost charges are greyed out.
-- **Level** (next to XP, GM only). The caster level of the item's spell powers: their
-  duration uses it. Left at 0, the effects they apply have no duration.
+- **Charges.** The DMG rolls them for each item found, so they start at 0. Set them when the
+  item is found, in the item's *Attributes* tab (**Maximum** and **Used**). Until then, the
+  powers that cost charges are greyed out.
 
   ![Item charges](docs/images/item-charges.png)
+
+- **Level** (next to XP, GM only). The caster level of the item's spell powers: their
+  duration uses it. Left at 0, the effects they apply have no duration.
 
 - **Passive effects** of worn items (bonuses to AC, saving throws, ability scores…) and the
   temporary effects of potions. Exception: the cloak of displacement (and the displacer
   beast) make the first attack of each opponent miss, as long as the cloak is equipped.
+  This only works when the wearer is in the combat tracker; outside combat, ARS shows a
+  warning and the GM keeps track of the first attacks.
 - No action for items that summon a creature, for flying and movement items, or for the
   necklace of missiles (the strength of its missiles is rolled per necklace).

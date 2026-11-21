@@ -7414,6 +7414,7 @@ def _effect_action(name, img, changes, duration, targeting='single', applyself=F
     act = _make_action(name, type_='effect', img=img, targeting=targeting,
                        effect_changes=[{'key': k, 'type': t, 'value': v} for k, t, v in changes])
     act['effect']['duration'] = duration
+    act['misc'] = name     # chat card shows "Effect (<misc>)" instead of the first change key
     act['effect']['system'] = {
         'applyself': applyself, 'visibility': 'default', 'showIcon': 1, 'afterEffects': [],
         'aura': {'enabled': False, 'distance': 10, 'shape': 'circle', 'disposition': 'friendly',
