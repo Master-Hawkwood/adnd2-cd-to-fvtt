@@ -87,8 +87,9 @@ a weapon is added to a character who has the proficiency.
 ## Weapons
 
 Filled: the modes the weapon can be used in (melee, thrown, ranged), damage against small and
-large targets, damage type, speed, size, attacks per round, and the ranges of thrown and
-missile weapons.
+large targets, damage type, speed, size, attacks per round, the ranges of thrown and
+missile weapons, and for magic weapons the attack and damage bonus and the magic potency
+(the "+N" needed to hit some creatures).
 
 ![Dagger](docs/images/weapon-dagger-modes.png)
 
@@ -121,6 +122,10 @@ Filled, as actions:
   limit: charges from the item, uses per day or per week, or the item used up.
 - **Heal and damage** actions for items that heal or deal damage without a spell (healing
   potions, ring of the ram, robe of stars…).
+- **Strikes that spend charges** for the staves and rods that need them (staff of striking,
+  staff of power, rod of smiting…): an attack that uses the charges, then the damage roll.
+
+Every magic item has its **Magic** box ticked.
 
 ![Wand of fire](docs/images/item-wand-of-fire-actions.png)
 
@@ -128,6 +133,8 @@ Left empty:
 
 - **Charges.** Set them when the item is found, in the item's *Attributes* tab (**Maximum**
   and **Used**). Until then, the powers that cost charges are greyed out.
+- **Level** (next to XP, GM only). The caster level of the item's spell powers: their
+  duration uses it. Left at 0, the effects they apply have no duration.
 
   ![Item charges](docs/images/item-charges.png)
 

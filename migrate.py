@@ -73,8 +73,10 @@ from PIL import Image
 # If 'fvtt' is not on PATH, use the list form for npx:
 #   _FVTT_CLI_CMD = ['npx', '@foundryvtt/foundryvtt-cli']
 _FVTT_CLI_CMD: "str | list[str]" = 'fvtt'
-# Intermediate JSON staging directory (deleted after packing).
-_PACK_SRC_BASE = "adnd2-compendium-src"
+# Intermediate JSON staging directory (deleted after packing). Kept in the
+# system temp folder: inside a synced folder (OneDrive) Windows refuses to
+# delete or rename its sub-folders while the sync client holds them.
+_PACK_SRC_BASE = os.path.join(tempfile.gettempdir(), "adnd2-compendium-src")
 
 # Phase 2 — HTML rulebooks
 SOURCE_BASE  = "cd-rom/MACBOOKS/HTML"
@@ -1417,14 +1419,31 @@ def parse_part_record(buf, start, end):
             except (UnicodeDecodeError, ValueError):
                 pass
 
-    # Magic enchantment bonus int32 @+438 (weapons)
-    if post + 438 + 4 <= end:
+    # Magic enchantment (weapons): int32 pair (to-hit, damage) 52 bytes before
+    # the TSRP3 V7 landmark. The old fixed offset (post+438) drifted with the
+    # record's variable-length strings (missed ~230 "+N" weapons, gave the Adze
+    # +4). Armor overrides this below with its own AC-relative bonus.
+    if v7_pos >= 52:
         try:
-            mag = struct.unpack_from('<i', buf, post + 438)[0]
-            if -5 <= mag <= 5:
-                r['magic_bonus'] = mag
+            hit_b, dmg_b = struct.unpack_from('<2i', rec_data, v7_pos - 52)
+            if -6 <= hit_b <= 6 and -6 <= dmg_b <= 6:
+                r['magic_bonus'] = hit_b
+                r['magic_bonus_dmg'] = dmg_b
         except struct.error:
             pass
+    # Magic-item flag: int32 (1 = magic, 0 = mundane) just before the icon-id
+    # Pascal ("132", "469"), the last 1-4 digit string 255-330 bytes before
+    # TSRP3 V7. Absent on records without that string (None → name rule).
+    if v7_pos > 330:
+        icon_at = None
+        for q in range(v7_pos - 330, v7_pos - 255):
+            n = rec_data[q]
+            if 1 <= n <= 4 and all(48 <= b <= 57 for b in rec_data[q+1:q+1+n]):
+                icon_at = q
+        if icon_at is not None:
+            flag = struct.unpack_from('<i', rec_data, icon_at - 4)[0]
+            if flag in (0, 1):
+                r['magic_flag'] = flag
 
     # Armor AC — landmark float32 -1.0 (bytes 00 00 80 BF)
     ac_marker = rec_data.find(b'\x00\x00\x80\xBF')
@@ -5671,7 +5690,9 @@ def make_part_item(part, img_path=None, base_weapons=None):
         ftype = 'item'
 
     magic_bonus = part.get('magic_bonus', 0)
-    is_magic = bool(magic_bonus) or bool(re.search(r'[+\-]\d', part['name']))
+    dmg_bonus = part.get('magic_bonus_dmg', magic_bonus)
+    is_magic = (bool(part['magic_flag']) if part.get('magic_flag') is not None
+                else bool(magic_bonus) or bool(re.search(r'[+\-]\d', part['name'])))
     size = _SIZE_NORMALIZE.get(part.get('size_category', ''), 'medium')
 
     # Common ARSItem attributes (OSRIC shape). classRestrictions isn't an ARS
@@ -5756,7 +5777,9 @@ def make_part_item(part, img_path=None, base_weapons=None):
             "speed": part.get('speed', 0),
             "type": "ranged" if is_ranged else "melee",
             "perRound": per_round,
-            "modifier": 0, "magicBonus": magic_bonus, "magicPotency": 0,
+            "modifier": 0, "magicBonus": magic_bonus,
+            # counts as a +N weapon for creatures only hit by magic weapons
+            "magicPotency": max(0, magic_bonus, dmg_bonus),
             "range": attack_range,
             "primary": False, "speedmod": "",
             # ARS 2026.11.02 attack modes. Blank overrides = use the core values.
@@ -5786,7 +5809,7 @@ def make_part_item(part, img_path=None, base_weapons=None):
             "type": _ars_damage_type(dmg_code),
             "normal": dmg_normal or "0",
             "large":  dmg_large or "0",
-            "otherdmg": [], "modifier": 0, "magicBonus": magic_bonus,
+            "otherdmg": [], "modifier": 0, "magicBonus": dmg_bonus,
         }
         system["weaponstyle"] = ""
         # Weapon has a top-level system.size (schema initial "medium") in addition
@@ -7371,6 +7394,9 @@ _SPELL_HIT_SPECIALS = {
 }
 # Displacement (ARS special.displacement: the first attack of each opponent in
 # a combat misses). Not a 2e spell: a permanent property of these records.
+# PARTS.DAT magic records that lack the icon string carrying the magic flag
+# (every other magic-named record has the flag set): Ring of Weakness.
+_MAGIC_WITHOUT_FLAG = {2278}
 _DISPLACEMENT_ITEMS = {2064}      # PARTS.DAT: Cloak of Displacement (worn → transferred)
 _DISPLACEMENT_MONSTERS = {133}    # MONSTER.DAT: Displacer Beast (innate)
 
@@ -8270,7 +8296,8 @@ def _finalize_with_fvtt_cli():
     print(f"  → {ok} packs OK, {fail} failed")
     shutil.rmtree(tmp_root, ignore_errors=True)
     if fail == 0:
-        shutil.rmtree(_PACK_SRC_BASE)   # clean up staging dir on full success
+        # clean up the staging dir on full success; a leftover is harmless
+        shutil.rmtree(_PACK_SRC_BASE, ignore_errors=True)
     return fail
 
 
@@ -10669,7 +10696,9 @@ _ITEM_DESCRIPTION_FROM = {2448: 2343}   # Wand of Earth and Stone (Transmutation
 
 _NUMBER_WORDS = {'once': 1, 'twice': 2, 'thrice': 3, 'one': 1, 'two': 2,
                  'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7,
-                 'eight': 8, 'nine': 9, 'ten': 10, '½': 0.5, 'half': 0.5}
+                 'eight': 8, 'nine': 9, 'ten': 10, '½': 0.5, 'half': 0.5,
+                 'a': 1, 'an': 1}
+_TIMES_WORDS = {'double': 2, 'doubled': 2, 'triple': 3, 'tripled': 3}
 _SPELL_ITEMS_BY_INDEX = {}   # SPELLS.DAT index → generated spell item (filled by migrate_spells)
 
 
@@ -10777,7 +10806,33 @@ def _add_item_spell_powers(item, part_index):
 #            put in the name as '{n}', group 2 is the formula).
 _MD = r'(\d+d\d+(?:\s*[+-]\s*\d+)?)'
 _HEAL_POTION = [dict(group='Quaff', acts=[('Heal', 'heal', r'restores ' + _MD + r' hit points', '')])]
+_MDP = r'(\d+d\d+\s*\+\s*\d+)'
 _ITEM_MECHANIC_ACTIONS = {
+    # Weapon staves/rods whose strikes spend charges (lead='melee': the attack
+    # roll carries the charge cost, the damage action follows it).
+    305: [  # Staff of Striking
+        dict(group='Strike (1 charge)', lead='melee', res=('charge', r'when a hit is scored\. This expends (a) charge'),
+             acts=[('Damage', 'damage', r'causes ' + _MDP + r' points of damage when a hit is scored', '')]),
+        dict(group='Strike (2 charges)', lead='melee', res=('charge', r'If (two) charges are expended, bonus damage is doubled'),
+             acts=[('Damage', 'damage', r'bonus damage is doubled \(' + _MDP + r'\)', '')]),
+        dict(group='Strike (3 charges)', lead='melee', res=('charge', r'if (three) charges are expended, bonus damage is tripled'),
+             acts=[('Damage', 'damage', r'bonus damage is tripled \(' + _MDP + r'\)', '')])],
+    304: [dict(group='Strike (charge)', lead='melee',     # Staff of Power
+               res=('charge', r'if (one) charge is expended, the staff causes'),
+               acts=[('Damage', 'damage', r'inflicts ' + _MDP + r' points of damage; if', '',
+                      {'times': r'charge is expended, the staff causes (\w+) damage'})])],
+    323: [  # Rod of Smiting
+        dict(group='Strike vs golem', lead='melee', res=('charge', r'Any hit upon a golem drains (\w+) charge'),
+             acts=[('Damage', 'damage', r'Against golems, the rod causes ' + _MDP + r' points', '')]),
+        dict(group='Natural 20 vs Outer Planes', lead='melee', res=('charge', r'20 or better draws off (\w+) charge'),
+             acts=[('Damage', 'damage', r'causes triple damage: \(' + _MDP + r'\)', '',
+                    {'times': r'draws off \w+ charge and causes (\w+) damage'})])],
+    308: [dict(group='Lightning', lead='melee',           # Staff of Thunder and Lightning
+               res=('charge', r'damage from shock\. .{0,250}?This power requires the expenditure of (\w+) charge'),
+               acts=[('Shock', 'damage', r'plus (\d+d\d+) additional points of damage from shock', 'lightning')])],
+    335: [dict(group='Large missile', lead='use',          # Staff of Slinging
+               res=('charge', r'can expend (\w+) charge and thereby use the staff to hurl a missile'),
+               acts=[('Damage', 'damage', r'range out to \d+ feet, (\d+d\d+) poi', '')])],
     2211: _HEAL_POTION,                                     # Potion of Healing
     4565: [dict(group='Use', acts=_HEAL_POTION[0]['acts'])],   # Healing (2nd record, not typed as a potion)
     2206: _HEAL_POTION,                                     # Potion of Extra-healing
@@ -10838,6 +10893,13 @@ def _add_item_mechanic_actions(item, part_index):
                         b = _anchor_number(text, opts['plus'])
                         if b:
                             formula += f'+{b}'
+                    if opts.get('times'):
+                        tm = re.search(opts['times'], text, re.I)
+                        k = _TIMES_WORDS.get(tm.group(1).lower()) if tm else None
+                        if not k:
+                            print(f"  WARNING: item action — multiplier not found in {item['name']}: {name}")
+                            continue
+                        formula = f'({formula})*{k}'
                     found = [(_anchor_number(text, opts['cost']) if opts.get('cost') else '', formula)]
             if not found:
                 print(f"  WARNING: item action — anchor not found in {item['name']}: {name}")
@@ -10854,8 +10916,10 @@ def _add_item_mechanic_actions(item, part_index):
         if not acts:
             continue
         if spec.get('res'):
-            if len(acts) > 1:
-                acts.insert(0, _make_action(spec['group'], type_='use', targeting='self', img=icon))
+            if len(acts) > 1 or spec.get('lead'):
+                lead = spec.get('lead', 'use')
+                acts.insert(0, _make_action(spec['group'], type_=lead,
+                                            targeting='self' if lead == 'use' else 'single', img=icon))
             kind, anchor = spec['res']
             n = _anchor_number(text, anchor)
             if n is None:
@@ -10931,6 +10995,8 @@ def migrate_items():
         if _is_non_item_part(part['name']):   # S&P build data, not equipment
             skipped_nonitem += 1
             continue
+        if part_index in _MAGIC_WITHOUT_FLAG:
+            part['magic_flag'] = 1
         img = extract_equip_icon(part.get('icon_id'), OUTPUT_IMG_ITEMS)
         item, item_effects = make_part_item(part, img, base_weapons=base_weapons)
         desc_by_index[part_index] = item['system'].get('description', '')
